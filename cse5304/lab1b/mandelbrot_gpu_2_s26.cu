@@ -9,6 +9,7 @@
 //    }>
 
 #include <cstdint>
+#include <stdio.h>
 #include <cuda_runtime.h>
 
 // DO NOT CHANGE THESE PARAMETERS
@@ -183,9 +184,55 @@ void launch_mandelbrot_gpu_vector_multicore_multithread_single_sm(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    // Launch a single block with maximum warps (32 warps = 1024 threads)
-    // This is the hardware limit per block on most GPUs
-    const uint32_t threads_per_block = 32 * warp_size;  // 32 warps × 32 threads = 1024
+    // Test different warp counts on a single SM to measure latency hiding effects
+    uint32_t warp_counts[] = {4, 8, 16, 24, 32};
+    int num_tests = 5;
+    
+    printf("\n========== Single SM Warp Scaling Test ==========\n");
+    printf("Image: %ux%u, Max Iterations: %u\n", img_size, img_size, max_iters);
+    printf("Warps  Threads  Runtime(ms)  Speedup vs 4w\n");
+    printf("-------------------------------------------------\n");
+    
+    float baseline_time = 0.0f;
+    
+    for (int i = 0; i < num_tests; i++) {
+        uint32_t num_warps = warp_counts[i];
+        uint32_t threads_per_block = num_warps * warp_size;
+        
+        // Warm-up run
+        mandelbrot_gpu_vector_multicore_multithread_single_sm<<<1, threads_per_block>>>(
+            img_size, max_iters, out);
+        cudaDeviceSynchronize();
+        
+        // Create timing events
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+        
+        // Timed run
+        cudaEventRecord(start);
+        mandelbrot_gpu_vector_multicore_multithread_single_sm<<<1, threads_per_block>>>(
+            img_size, max_iters, out);
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        
+        float milliseconds = 0;
+        cudaEventElapsedTime(&milliseconds, start, stop);
+        
+        if (i == 0) baseline_time = milliseconds;
+        float speedup = baseline_time / milliseconds;
+        
+        printf("%5u  %7u  %11.2f  %13.2fx\n", 
+               num_warps, threads_per_block, milliseconds, speedup);
+        
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+    }
+    
+    printf("=================================================\n\n");
+    
+    // Final run with default (32 warps) for correctness check
+    const uint32_t threads_per_block = 32 * warp_size;
     mandelbrot_gpu_vector_multicore_multithread_single_sm<<<1, threads_per_block>>>(
         img_size, max_iters, out);
 }
