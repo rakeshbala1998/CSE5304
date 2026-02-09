@@ -66,7 +66,6 @@ uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 ////////////////////////////////////////////////////////////////////////////////
 // Vector + Multi-core
 
-// Structure to pass arguments to each thread
 struct ThreadArgs {
     uint32_t img_size;
     uint32_t max_iters;
@@ -75,7 +74,6 @@ struct ThreadArgs {
     uint32_t end_row;
 };
 
-// Worker function for each thread - processes rows from start_row to end_row
 void* mandelbrot_thread_worker(void* arg) {
     ThreadArgs* args = (ThreadArgs*)arg;
     uint32_t img_size = args->img_size;
@@ -84,10 +82,8 @@ void* mandelbrot_thread_worker(void* arg) {
     uint32_t start_row = args->start_row;
     uint32_t end_row = args->end_row;
     
-    // Process each row assigned to this thread
     for (uint32_t i = start_row; i < end_row; ++i) {
         for (uint32_t j = 0; j < img_size; j += 8) {
-            // Calculate complex coordinates for 8 pixels at once
             __m256 j_vec = _mm256_set_ps(
                 float(j + 7), float(j + 6), float(j + 5), float(j + 4),
                 float(j + 3), float(j + 2), float(j + 1), float(j + 0)
@@ -105,7 +101,6 @@ void* mandelbrot_thread_worker(void* arg) {
             float cy = (float(i) / float(img_size)) * window_zoom + window_y;
             __m256 cy_vec = _mm256_set1_ps(cy);
             
-            // Initialize iteration variables
             __m256 x2 = _mm256_setzero_ps();
             __m256 y2 = _mm256_setzero_ps();
             __m256 w = _mm256_setzero_ps();
@@ -114,39 +109,25 @@ void* mandelbrot_thread_worker(void* arg) {
             __m256 four = _mm256_set1_ps(4.0f);
             __m256i one = _mm256_set1_epi32(1);
             
-            // Iterate for all 8 pixels simultaneously
             for (uint32_t iter = 0; iter < max_iters; ++iter) {
-                // Check which pixels are still active (x2 + y2 <= 4.0)
                 __m256 sum = _mm256_add_ps(x2, y2);
                 __m256 mask = _mm256_cmp_ps(sum, four, _CMP_LE_OQ);
                 
-                // If no pixels are active, break
                 if (_mm256_movemask_ps(mask) == 0) break;
                 
-                // x = x2 - y2 + cx
                 __m256 x = _mm256_add_ps(_mm256_sub_ps(x2, y2), cx);
-                
-                // y = w - (x2 + y2) + cy
                 __m256 y = _mm256_add_ps(_mm256_sub_ps(w, sum), cy_vec);
                 
-                // x2 = x * x
                 x2 = _mm256_mul_ps(x, x);
-                
-                // y2 = y * y
                 y2 = _mm256_mul_ps(y, y);
                 
-                // z = x + y
                 __m256 z = _mm256_add_ps(x, y);
-                
-                // w = z * z
                 w = _mm256_mul_ps(z, z);
                 
-                // Increment iteration count for active pixels
                 __m256i mask_int = _mm256_castps_si256(mask);
                 iters_vec = _mm256_sub_epi32(iters_vec, _mm256_and_si256(mask_int, one));
             }
             
-            // Store results
             uint32_t iters[8];
             _mm256_storeu_si256((__m256i*)iters, iters_vec);
             for (int k = 0; k < 8; ++k) {
@@ -166,10 +147,8 @@ void mandelbrot_cpu_vector_multicore(
     pthread_t threads[num_threads];
     ThreadArgs thread_args[num_threads];
     
-    // Calculate rows per thread
     uint32_t rows_per_thread = img_size / num_threads;
     
-    // Create threads
     for (uint32_t t = 0; t < num_threads; ++t) {
         thread_args[t].img_size = img_size;
         thread_args[t].max_iters = max_iters;
@@ -193,16 +172,12 @@ void mandelbrot_cpu_vector_multicore_multithread(
     uint32_t img_size,
     uint32_t max_iters,
     uint32_t *out) {
-    // Use more threads than cores to exploit multi-threading
-    // Testing with 4x the core count (64 cores × 4 = 256 threads)
     const uint32_t num_threads = 256;
     pthread_t threads[num_threads];
     ThreadArgs thread_args[num_threads];
     
-    // Calculate rows per thread
     uint32_t rows_per_thread = img_size / num_threads;
     
-    // Create threads
     for (uint32_t t = 0; t < num_threads; ++t) {
         thread_args[t].img_size = img_size;
         thread_args[t].max_iters = max_iters;

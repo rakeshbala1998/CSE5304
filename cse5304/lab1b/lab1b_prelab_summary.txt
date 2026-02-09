@@ -65,14 +65,7 @@ Q: Considering expected FMA latency, what may explain this behavior?
 A: This behavior is explained by LATENCY HIDING through warp-level parallelism:
 
    1. LATENCY HIDING PRINCIPLE:
-      With 4-cycle FMA latency, while one warp waits for its instruction to
-      complete, the scheduler needs 3-4 other warps to switch to, keeping the
-      execution units busy.
-      
-      Formula: Warps needed per scheduler ≈ Instruction Latency
-      
-      Prediction: 336 schedulers × 4 cycles = 1344 warps minimum
-      Observed: 1344 warps achieves 34.91 TFLOPS (95% of peak) ✓
+     
 
    2. PERFORMANCE REGIONS:
       

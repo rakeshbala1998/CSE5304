@@ -62,33 +62,21 @@ constexpr uint32_t num_sms = 84;
 __global__ void mandelbrot_gpu_vector_multicore(
     uint32_t img_size,
     uint32_t max_iters,
-    uint32_t *out /* pointer to GPU memory */
+    uint32_t *out
 ) {
-    // Calculate warp ID: which of the 336 warps am I?
-    // Each block has (blockDim.x / warp_size) warps
     uint32_t warp_id = blockIdx.x * (blockDim.x / warp_size) + threadIdx.x / warp_size;
-    
-    // Calculate thread ID within warp (lane ID: 0-31)
     uint32_t lane_id = threadIdx.x % warp_size;
-    
-    // Total number of warps
     uint32_t total_warps = num_sms * num_warp_schedulers;
-    
-    // Total pixels to compute
     uint64_t total_pixels = (uint64_t)img_size * img_size;
     
-    // Partition work across warps
-    // Each warp processes a contiguous block of pixels
     uint64_t pixels_per_warp = (total_pixels + total_warps - 1) / total_warps;
     uint64_t start_pixel = warp_id * pixels_per_warp;
     uint64_t end_pixel = start_pixel + pixels_per_warp;
     if (end_pixel > total_pixels) end_pixel = total_pixels;
     
-    // Each thread in the warp processes every 32nd pixel in this block
     for (uint64_t pixel = start_pixel + lane_id; pixel < end_pixel; pixel += warp_size) {
-        // Convert linear pixel index to 2D coordinates
-        uint32_t i = pixel / img_size;  // row
-        uint32_t j = pixel % img_size;  // column
+        uint32_t i = pixel / img_size;
+        uint32_t j = pixel % img_size;
         
         // Map pixel to complex plane
         float cx = (float(j) / float(img_size)) * window_zoom + window_x;
@@ -109,7 +97,6 @@ __global__ void mandelbrot_gpu_vector_multicore(
             ++iters;
         }
         
-        // Write result
         out[pixel] = iters;
     }
 }
@@ -117,13 +104,8 @@ __global__ void mandelbrot_gpu_vector_multicore(
 void launch_mandelbrot_gpu_vector_multicore(
     uint32_t img_size,
     uint32_t max_iters,
-    uint32_t *out /* pointer to GPU memory */
+    uint32_t *out
 ) {
-    // Launch with 84 blocks, each with 128 threads (4 warps per block)
-    // This gives us 84 × 4 = 336 warps total, one per warp scheduler
-    // Configuration: <<<num_sms, num_warp_schedulers * warp_size>>>
-    //              = <<<84, 4 * 32>>>
-    //              = <<<84, 128>>>
     mandelbrot_gpu_vector_multicore<<<num_sms, num_warp_schedulers * warp_size>>>(
         img_size, max_iters, out);
 }
@@ -134,20 +116,13 @@ void launch_mandelbrot_gpu_vector_multicore(
 __global__ void mandelbrot_gpu_vector_multicore_multithread_single_sm(
     uint32_t img_size,
     uint32_t max_iters,
-    uint32_t *out /* pointer to GPU memory */
+    uint32_t *out
 ) {
-    // Run multiple warps on a single SM (single block)
-    // Calculate warp ID within this block
     uint32_t warp_id = threadIdx.x / warp_size;
     uint32_t lane_id = threadIdx.x % warp_size;
-    
-    // Total warps in this block
     uint32_t total_warps = blockDim.x / warp_size;
-    
-    // Total pixels to compute
     uint64_t total_pixels = (uint64_t)img_size * img_size;
     
-    // Partition work across warps
     uint64_t pixels_per_warp = (total_pixels + total_warps - 1) / total_warps;
     uint64_t start_pixel = warp_id * pixels_per_warp;
     uint64_t end_pixel = start_pixel + pixels_per_warp;
@@ -182,15 +157,13 @@ __global__ void mandelbrot_gpu_vector_multicore_multithread_single_sm(
 void launch_mandelbrot_gpu_vector_multicore_multithread_single_sm(
     uint32_t img_size,
     uint32_t max_iters,
-    uint32_t *out /* pointer to GPU memory */
+    uint32_t *out
 ) {
-    // Static flag to run warp scaling test only once (BENCHPRESS calls this multiple times)
     static bool test_done = false;
     
     if (!test_done) {
         test_done = true;
         
-        // Test different warp counts on a single SM to measure latency hiding effects
         uint32_t warp_counts[] = {4, 8, 16, 24, 32};
         int num_tests = 5;
         
@@ -205,17 +178,14 @@ void launch_mandelbrot_gpu_vector_multicore_multithread_single_sm(
             uint32_t num_warps = warp_counts[i];
             uint32_t threads_per_block = num_warps * warp_size;
             
-            // Warm-up run
             mandelbrot_gpu_vector_multicore_multithread_single_sm<<<1, threads_per_block>>>(
                 img_size, max_iters, out);
             cudaDeviceSynchronize();
             
-            // Create timing events
             cudaEvent_t start, stop;
             cudaEventCreate(&start);
             cudaEventCreate(&stop);
             
-            // Timed run
             cudaEventRecord(start);
             mandelbrot_gpu_vector_multicore_multithread_single_sm<<<1, threads_per_block>>>(
                 img_size, max_iters, out);
@@ -238,7 +208,6 @@ void launch_mandelbrot_gpu_vector_multicore_multithread_single_sm(
         printf("=================================================\n\n");
     }
     
-    // Normal run with default (32 warps) for BENCHPRESS timing
     const uint32_t threads_per_block = 32 * warp_size;
     mandelbrot_gpu_vector_multicore_multithread_single_sm<<<1, threads_per_block>>>(
         img_size, max_iters, out);
@@ -250,21 +219,14 @@ void launch_mandelbrot_gpu_vector_multicore_multithread_single_sm(
 __global__ void mandelbrot_gpu_vector_multicore_multithread_full(
     uint32_t img_size,
     uint32_t max_iters,
-    uint32_t *out /* pointer to GPU memory */
+    uint32_t *out
 ) {
-    // Run many warps across all SMs
-    // Calculate global warp ID
     uint32_t warps_per_block = blockDim.x / warp_size;
     uint32_t warp_id = blockIdx.x * warps_per_block + threadIdx.x / warp_size;
     uint32_t lane_id = threadIdx.x % warp_size;
-    
-    // Total warps in this launch
     uint32_t total_warps = gridDim.x * warps_per_block;
-    
-    // Total pixels to compute
     uint64_t total_pixels = (uint64_t)img_size * img_size;
     
-    // Partition work across warps
     uint64_t pixels_per_warp = (total_pixels + total_warps - 1) / total_warps;
     uint64_t start_pixel = warp_id * pixels_per_warp;
     uint64_t end_pixel = start_pixel + pixels_per_warp;
@@ -299,14 +261,11 @@ __global__ void mandelbrot_gpu_vector_multicore_multithread_full(
 void launch_mandelbrot_gpu_vector_multicore_multithread_full(
     uint32_t img_size,
     uint32_t max_iters,
-    uint32_t *out /* pointer to GPU memory */
+    uint32_t *out
 ) {
-    // Launch with many warps across all SMs
-    // Use 8 warps per SM (8 × 4 schedulers = 32 warps per SM, 2× oversubscription per scheduler)
     const uint32_t warps_per_sm = 8;
-    const uint32_t threads_per_block = warps_per_sm * warp_size;  // 8 warps × 32 = 256 threads
-    const uint32_t num_blocks = num_sms;  // 84 blocks
-    // Total warps: 84 blocks × 8 warps/block = 672 warps (2× the 336 schedulers)
+    const uint32_t threads_per_block = warps_per_sm * warp_size;
+    const uint32_t num_blocks = num_sms;
     mandelbrot_gpu_vector_multicore_multithread_full<<<num_blocks, threads_per_block>>>(
         img_size, max_iters, out);
 }
