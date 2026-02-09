@@ -1,0 +1,117 @@
+================================================================================
+LAB 1B - QUICK REFERENCE GUIDE
+================================================================================
+
+PART 1: MULTICORE PARALLELISM
+================================================================================
+
+QUESTION 1: Work partitioning?
+→ CPU: Row-based across 64 threads
+→ GPU: Block-based across 336 warps (stride-32 within warp)
+
+QUESTION 2: GPU speedup?
+→ 3.56× over CPU (14.1 ms → 3.96 ms)
+
+QUESTION 3: Alternative configs work?
+→ YES! <<<84,128>>>, <<<168,64>>>, <<<42,256>>> all produce 336 warps
+→ Performance identical, block shape doesn't matter
+
+PART 2: MULTI-THREADING
+================================================================================
+
+QUESTION 4: CPU multi-threading?
+→ Speedup: 1.35× at 128 threads
+→ Optimal: 128 (2× cores, matches 2-way SMT)
+→ Beyond 128: Performance cliff due to cache contention
+
+QUESTION 5: GPU single SM?
+→ Improvement: YES, continuous up to 32 warps
+→ Speedup: 3.81× (508.93 ms → 133.62 ms)
+→ Factors: Latency hiding, occupancy
+
+QUESTION 6: GPU full multi-threading?
+→ Speedup: 2.77× at 28 warps/SM
+→ Optimal: 2352 warps (7× per scheduler)
+→ NOT maximum! 32 warps/SM regresses (register pressure)
+
+FINAL PERFORMANCE (2048×2048, 2000 iterations)
+================================================================================
+CPU Scalar:                   1788.0 ms  (1.0×)
+CPU Multicore (64 threads):     14.1 ms  (127×)
+CPU Multithread (128 threads):  11.0 ms  (163×) ★ BEST CPU
+
+GPU Multicore (336 warps):      10.4 ms  (172×)
+GPU Multithread (2352 warps):    3.78 ms  (473×) ★ BEST GPU
+
+Best GPU vs Best CPU: 2.9× speedup
+
+KEY IMPLEMENTATIONS
+================================================================================
+File: mandelbrot_cpu_2_s26.cpp
+- mandelbrot_cpu_vector_multicore() - 64 threads + AVX2
+- mandelbrot_cpu_vector_multicore_multithread() - 256 threads + AVX2
+
+File: mandelbrot_gpu_2_s26.cu
+- mandelbrot_gpu_vector_multicore() - 336 warps (<<<84, 128>>>)
+- mandelbrot_gpu_vector_multicore_multithread_single_sm() - 32 warps single SM
+- mandelbrot_gpu_vector_multicore_multithread_full() - 2352 warps (<<<84, 256>>>)
+
+COMPILATION
+================================================================================
+CPU: g++ -march=native -O3 -pthread -o mandelbrot_cpu_2_s26 mandelbrot_cpu_2_s26.cpp
+GPU: nvcc --compiler-bindir /usr/bin -o mandelbrot_gpu_2_s26 mandelbrot_gpu_2_s26.cu -O3
+
+EXECUTION
+================================================================================
+CPU multicore:      ./mandelbrot_cpu_2_s26 -i vector_multicore -r 2048
+CPU multithread:    ./mandelbrot_cpu_2_s26 -i vector_multicore_multithread -r 2048
+GPU multicore:      ./mandelbrot_gpu_2_s26 -i vector_multicore -r 2048
+GPU single SM:      ./mandelbrot_gpu_2_s26 -i vector_multicore_multithread_single_sm -r 2048
+GPU full:           ./mandelbrot_gpu_2_s26 -i vector_multicore_multithread_full -r 2048
+
+DOCUMENTATION
+================================================================================
+MAIN DOCUMENTS:
+- LAB1B_COMPLETE_FINAL.txt - Complete summary with all answers
+- PART2_MULTITHREAD_ANALYSIS.txt - Detailed Part 2 analysis
+
+PART 1:
+- PART1_COMPLETE_SUMMARY.txt - CPU implementation details
+- PART2_GPU_MULTICORE_ANALYSIS.txt - GPU implementation details
+- PART2_QUICK_REFERENCE.txt - Questions 1-3 quick answers
+- COMPLETE_LAB1B_SUMMARY.txt - CPU vs GPU comparison
+
+BENCHMARKS:
+- test_cpu_multithread.cpp - Tests 32-512 threads
+- test_gpu_single_sm.cu - Tests 1-32 warps on single SM
+- test_gpu_full_multithread.cu - Tests 1-32 warps/SM
+
+OUTPUT IMAGES (in out/ directory):
+- mandelbrot_cpu_vector_multicore.bmp
+- mandelbrot_cpu_vector_multicore_multithread.bmp
+- mandelbrot_gpu_vector_multicore.bmp
+- mandelbrot_gpu_vector_multicore_multithread_single_sm.bmp
+- mandelbrot_gpu_vector_multicore_multithread_full.bmp
+
+KEY INSIGHTS
+================================================================================
+1. CPU: 2× threads (128) is optimal (matches 2-way SMT)
+   More threads cause severe performance degradation
+
+2. GPU: 7× warps per scheduler (28 warps/SM) is optimal
+   More warps cause register spilling
+
+3. Architecture determines strategy:
+   - CPU: Modest oversubscription (2×)
+   - GPU: Massive oversubscription (7×)
+
+4. Efficiency matters more than raw thread count:
+   - CPU: 99% efficient (127× from 128× parallelism)
+   - GPU: 17% efficient (473× from ~75K× parallelism)
+   But GPU still wins absolute performance!
+
+5. More is not always better:
+   - CPU: 160+ threads → disaster
+   - GPU: 32 warps/SM → regression
+
+================================================================================

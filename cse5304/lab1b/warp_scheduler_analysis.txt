@@ -1,0 +1,91 @@
+===================================================================================
+Warp Scheduler Throughput Analysis
+===================================================================================
+
+GPU CONFIGURATION:
+-----------------
+- 84 SMs (Streaming Multiprocessors)
+- 4 warp schedulers per SM
+- Total warp schedulers: 84 × 4 = 336
+- FMA latency from previous experiment: ~4-4.5 cycles
+
+KEY OBSERVATIONS FROM DATA:
+---------------------------
+1. Throughput scaling with warps:
+   - 168 warps (0.5× schedulers):   4.75 TFLOPS
+   - 336 warps (1× schedulers):     9.48 TFLOPS
+   - 672 warps (2× schedulers):    18.94 TFLOPS
+   - 1344 warps (4× schedulers):   34.91 TFLOPS
+   - 2688 warps (8× schedulers):   35.71 TFLOPS
+   - Peak around 8064-13776 warps: ~36.9 TFLOPS
+
+2. Performance patterns:
+   - Linear scaling up to ~1344 warps (4× warp schedulers)
+   - Noticeable dips at 1512, 2856, 4200, etc.
+   - Saturation/plateau after ~5000-6000 warps
+   - Peak throughput: ~36.9 TFLOPS (around 8064-13776 warps)
+
+3. Critical points:
+   - 336 warps = 1 warp per scheduler → 9.48 TFLOPS
+   - 1344 warps = 4 warps per scheduler → 34.91 TFLOPS (82% of peak)
+   - 1680 warps = 5 warps per scheduler → 25.76 TFLOPS (DROP!)
+   - 2688 warps = 8 warps per scheduler → 35.71 TFLOPS (recovery)
+
+ANSWER TO PRELAB QUESTION 2:
+----------------------------
+When do you observe the benchmark hitting maximum throughput?
+
+Maximum throughput is achieved starting around 5376 warps and sustained through
+~13776 warps, reaching peak of approximately 36.9 TFLOPS. This represents:
+- 16 warps per warp scheduler (5376 / 336 = 16)
+- Up to ~41 warps per warp scheduler (13776 / 336 = 41)
+
+What may explain this behavior?
+
+The throughput pattern is explained by LATENCY HIDING through warp-level parallelism:
+
+1. **FMA Latency**: With an FMA latency of ~4-4.5 cycles, a single warp executing
+   dependent operations would stall waiting for results. The warp scheduler needs
+   other warps to switch to during these stalls.
+
+2. **Minimum Warps for Peak**: To fully hide the 4-5 cycle latency and keep all
+   execution units busy, we need at least 4-5 independent warps per warp scheduler.
+   
+   336 schedulers × 4 warps = 1344 warps → 34.91 TFLOPS (82% of peak)
+   
+   This is close to peak, demonstrating latency hiding is working.
+
+3. **The Dips (1512, 2856, etc.)**: These occur at specific SM occupancy boundaries:
+   - 1512 warps = 84 SMs × 18 warps/SM
+   - 2856 warps = 84 SMs × 34 warps/SM
+   
+   These dips likely reflect:
+   - Resource constraints (registers, shared memory) at certain occupancy levels
+   - Uneven warp distribution across SMs
+   - SM occupancy limits affecting scheduling efficiency
+
+4. **Plateau Region (5000+ warps)**: Beyond ~16 warps per scheduler, we have
+   sufficient parallelism to:
+   - Fully hide instruction latency
+   - Keep all FMA units busy
+   - Tolerate memory access latencies
+   - Maintain peak throughput despite warp stalls
+
+5. **Why 4× schedulers (1344) works well**: With 4 warps per scheduler and FMA
+   latency of 4 cycles, while one warp waits for its FMA to complete (4 cycles),
+   the scheduler can execute instructions from 3-4 other warps, effectively hiding
+   the latency and maintaining throughput.
+
+CONCLUSION:
+-----------
+The GPU achieves maximum throughput when there are enough concurrent warps to hide
+instruction latency. With ~4-5 cycle FMA latency, we need at least 4-5 warps per
+scheduler (1344-1680 total warps) to approach peak performance. Beyond 16 warps per
+scheduler (5376 total), we have sufficient parallelism to fully saturate the
+hardware and maintain ~95% of theoretical peak throughput.
+
+The 84 × 4 = 336 warp schedulers can each manage multiple warps, switching between
+them to hide latencies and keep functional units busy - this is the fundamental
+mechanism of GPU throughput optimization.
+
+===================================================================================

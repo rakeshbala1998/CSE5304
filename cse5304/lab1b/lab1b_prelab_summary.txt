@@ -1,0 +1,146 @@
+===================================================================================
+LAB 1B PRELAB - COMPLETE SUMMARY
+===================================================================================
+
+PART 0: FMA INSTRUCTION LATENCY
+===================================================================================
+
+EXPERIMENT: Measure the latency of FFMA instruction with different levels of ILP
+
+RESULTS:
+--------
+1. fma_latency (dependent chain):     36 cycles for 8 FFMAs = 4.5 cycles/FFMA
+2. fma_latency_ilp (2 variables):     21 cycles for 8 FFMAs = 2.625 cycles/FFMA
+3. fma_latency_ilp2 (8 variables):    16 cycles for 8 FFMAs = 2.0 cycles/FFMA
+
+PRELAB QUESTION 1 ANSWER:
+-------------------------
+Q: What is the latency of one FFMA instruction?
+A: The true latency of a single FFMA instruction is approximately 4-4.5 cycles,
+   measured from the fully dependent chain in fma_latency kernel.
+
+Q: How did code exploit instruction level parallelism to improve observed latency?
+A: By using independent variables, the GPU executes multiple FFMAs concurrently:
+   
+   - No ILP (1 chain):  4.5 cycles/FFMA (pure latency-bound)
+   - 2-way ILP:         2.625 cycles/FFMA (2× concurrent execution)
+   - 8-way ILP:         2.0 cycles/FFMA (approaching throughput limit)
+   
+   The GPU has multiple FMA execution units that process independent operations
+   simultaneously, reducing observed latency from 4.5 cycles (latency) to ~2.0
+   cycles (throughput limit).
+
+===================================================================================
+
+PART 1: WARP SCHEDULER PARALLELISM
+===================================================================================
+
+EXPERIMENT: Vary number of warps and measure achieved throughput
+
+GPU SPECS:
+- 84 SMs × 4 warp schedulers = 336 total warp schedulers
+- FMA latency = 4-4.5 cycles (from Part 0)
+
+KEY RESULTS:
+-----------
+Warps     Warps/Scheduler    TFLOPS      Performance
+------    ---------------    ------      -----------
+  336           1            9.48        26% of peak
+ 1344           4           34.91        95% of peak ← Latency hiding!
+ 5376          16           36.17        98% of peak
+10752          32           36.88       100% peak
+
+PRELAB QUESTION 2 ANSWER:
+-------------------------
+Q: When do you observe the benchmark hitting maximum throughput?
+
+A: Maximum throughput (36.9 TFLOPS) is achieved starting around 5376 warps and
+   sustained through ~13776 warps. This represents 16-41 warps per warp scheduler.
+   
+   However, 95% of peak (34.91 TFLOPS) is already achieved at 1344 warps,
+   which is exactly 4 warps per scheduler - matching the FMA latency!
+
+Q: Considering expected FMA latency, what may explain this behavior?
+
+A: This behavior is explained by LATENCY HIDING through warp-level parallelism:
+
+   1. LATENCY HIDING PRINCIPLE:
+      With 4-cycle FMA latency, while one warp waits for its instruction to
+      complete, the scheduler needs 3-4 other warps to switch to, keeping the
+      execution units busy.
+      
+      Formula: Warps needed per scheduler ≈ Instruction Latency
+      
+      Prediction: 336 schedulers × 4 cycles = 1344 warps minimum
+      Observed: 1344 warps achieves 34.91 TFLOPS (95% of peak) ✓
+
+   2. PERFORMANCE REGIONS:
+      
+      • 0-1000 warps (0-3× schedulers): UNDERUTILIZED
+        → Not enough warps to hide latency
+        → Linear scaling with warp count
+        → Execution units frequently idle
+      
+      • 1000-5000 warps (3-15× schedulers): APPROACHING PEAK
+        → 1344 warps = 95% of peak (latency fully hidden)
+        → Some dips at SM occupancy boundaries (1512, 2856)
+        → Resource constraints (registers, shared memory)
+      
+      • 5000+ warps (15+ per scheduler): SATURATED
+        → Full latency hiding
+        → 98-100% of peak throughput
+        → Additional warps provide memory latency tolerance
+
+   3. WHY MORE THAN 4 WARPS HELPS:
+      While 4 warps/scheduler hides FMA latency, additional warps provide:
+      - Tolerance for memory access latencies (much longer than 4 cycles)
+      - Better load balancing across SMs
+      - Resilience to control flow divergence
+      - Coverage for cache misses and other stalls
+
+   4. THE DIPS (1512, 2856, etc.):
+      These occur at specific SM occupancy boundaries:
+      - 1512 warps = 18 warps/SM
+      - 2856 warps = 34 warps/SM
+      
+      Likely causes:
+      - Register/shared memory resource limits
+      - Uneven warp distribution
+      - SM occupancy thresholds affecting efficiency
+
+===================================================================================
+
+KEY INSIGHT - LATENCY vs THROUGHPUT:
+=====================================
+
+LATENCY (cycles per operation for single thread):
+- Single dependent chain: 4.5 cycles/FFMA
+- Cannot be reduced without faster hardware
+
+THROUGHPUT (operations per cycle across many threads):
+- With ILP: 0.5 FMAs/cycle (2 cycles/FFMA with 8-way ILP)
+- With many warps: Approach 1 FMA/cycle/unit (full saturation)
+
+GPU PERFORMANCE FORMULA:
+Peak Throughput = (# Execution Units) × (Throughput per Unit)
+Achieved Throughput = Peak × (Warps Available / Warps Needed for Latency Hiding)
+
+For this GPU:
+- Need ~4-5 warps per scheduler to hide 4-cycle latency
+- Need ~16+ warps per scheduler for full saturation (including memory latency)
+- With 336 schedulers: 1344 warps (95%), 5376+ warps (100%)
+
+===================================================================================
+
+FILES GENERATED:
+----------------
+1. fma_latency_s26.out          - FMA latency benchmark executable
+2. fma_latency_sass.txt         - SASS assembly code showing 8 FFMAs
+3. fma_latency_analysis.txt     - Detailed FMA latency analysis
+4. warp_scheduler.out           - Warp scheduler benchmark executable
+5. out                          - Raw throughput data
+6. warp_scheduler_analysis.txt  - Detailed warp scheduler analysis
+7. throughput_summary.txt       - Key throughput data points table
+8. lab1b_prelab_summary.txt     - This comprehensive summary
+
+===================================================================================

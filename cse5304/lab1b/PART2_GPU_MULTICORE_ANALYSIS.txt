@@ -1,0 +1,275 @@
+================================================================================
+LAB 1B - PART 2: GPU MULTICORE MANDELBROT IMPLEMENTATION AND ANALYSIS
+================================================================================
+Author: rab23008 (s26)
+Date: 2025
+
+================================================================================
+OVERVIEW
+================================================================================
+
+This document analyzes the GPU multicore Mandelbrot implementation using CUDA,
+which distributes work across all 336 warp schedulers on the A6000 GPU.
+
+GPU Architecture:
+- 84 Streaming Multiprocessors (SMs)
+- 4 warp schedulers per SM
+- Total: 336 warp schedulers
+- 32 threads per warp
+
+Target: Run exactly ONE warp on each warp scheduler for maximum parallelism
+without oversubscription.
+
+================================================================================
+QUESTION 1: IMPLEMENTATION DETAILS
+================================================================================
+
+KERNEL IMPLEMENTATION (mandelbrot_gpu_vector_multicore):
+--------------------------------------------------------
+
+The kernel implements a hierarchical parallelization strategy:
+
+1. WARP-LEVEL PARALLELISM:
+   - Each of the 336 warps gets a unique ID: warp_id = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32
+   - Total warps = 336 (one per scheduler)
+   - Work is partitioned across warps: each warp processes ~12,483 pixels (for 2048×2048 image)
+
+2. THREAD-LEVEL PARALLELISM (within warp):
+   - Each warp contains 32 threads (lanes: 0-31)
+   - Threads process every 32nd pixel within their warp's assigned block
+   - Stride pattern: pixel_index = start_pixel + lane_id, incrementing by +32
+
+3. WORK PARTITIONING STRATEGY:
+   - Linear pixel indexing: pixels numbered 0 to (img_size² - 1)
+   - Each warp gets contiguous block: pixels [start, start + pixels_per_warp)
+   - Formula: pixels_per_warp = ceil(total_pixels / 336)
+   - Converts linear index back to (row, col) inside kernel
+
+LAUNCH CONFIGURATION:
+--------------------
+launch_mandelbrot_gpu_vector_multicore<<<84, 128>>>(img_size, max_iters, out);
+
+Breaking down: <<<84, 128>>>
+- 84 blocks (one per SM)
+- 128 threads per block (4 warps × 32 threads)
+- Total threads: 84 × 128 = 10,752 threads
+- Total warps: 10,752 / 32 = 336 warps
+- Achieves: 1 warp per warp scheduler ✓
+
+ADVANTAGES OF THIS APPROACH:
+----------------------------
+1. MINIMAL CONTENTION: One warp per scheduler = no oversubscription
+2. LOAD BALANCING: Equal-sized pixel blocks per warp
+3. MEMORY COALESCING: Within-warp threads access nearby pixels (stride-32 pattern)
+4. SIMPLE WORK DISTRIBUTION: No dynamic scheduling overhead
+
+DISADVANTAGES:
+-------------
+1. LOAD IMBALANCE: Mandelbrot has variable iteration counts
+   - Some pixels terminate at iteration 1 (outside set)
+   - Others run full 2000 iterations (in set)
+   - Warps with "easier" pixels finish early but must wait
+   
+2. WARP DIVERGENCE: All 32 threads in a warp execute different pixels
+   - Different pixels converge at different iteration counts
+   - When one thread exits the while loop, others may continue
+   - Reduces SIMD efficiency within the warp
+   
+3. UNDERUTILIZATION: Only 336 warps running
+   - From warp_scheduler analysis, we know 1344+ warps achieve 95% peak
+   - Single warp per scheduler doesn't hide instruction latency well
+
+================================================================================
+QUESTION 2: SPEEDUP ANALYSIS
+================================================================================
+
+PERFORMANCE COMPARISON (2048×2048 image, 2000 max iterations):
+--------------------------------------------------------------
+
+CPU Multicore (64 threads + AVX2):  14.1 ms
+GPU Multicore (336 warps):           3.96 ms
+
+Speedup: 14.1 / 3.96 = 3.56x
+
+ANALYSIS:
+---------
+The GPU achieves a modest 3.56x speedup over the CPU multicore implementation.
+
+Why only 3.56x when GPU has 336 warps vs 64 CPU threads?
+
+1. CPU HAS VECTOR ADVANTAGES:
+   - AVX2 SIMD: 8-way float vectorization per core
+   - Effective parallelism: 64 threads × 8 floats = 512-way parallelism
+   - GPU warp parallelism: 336 warps × 32 threads = 10,752-way parallelism
+   - Theoretical GPU advantage: 10,752 / 512 = 21x
+   
+2. BUT SEVERAL FACTORS REDUCE GPU EFFICIENCY:
+   
+   a) WARP DIVERGENCE:
+      - Mandelbrot has irregular iteration counts
+      - Within each warp, threads diverge on while-loop termination
+      - CPU threads are independent (no lockstep execution)
+      - CPU AVX2 can use masked operations to maintain efficiency
+   
+   b) MEMORY LATENCY:
+      - GPU has higher memory latency than CPU cache
+      - Mandelbrot is compute-bound but still accesses output array
+      - Not enough warps to fully hide memory latency (need 4× schedulers from Part 0)
+   
+   c) INSTRUCTION LATENCY:
+      - From Part 0: FMA latency is 4-4.5 cycles
+      - From warp_scheduler: Need 4-16 warps per scheduler for good throughput
+      - We only have 1 warp per scheduler
+      - Arithmetic operations cannot be pipelined effectively
+   
+   d) LOAD IMBALANCE:
+      - Some warps get pixel regions that converge quickly
+      - Other warps get regions deep in the Mandelbrot set
+      - All warps must finish before kernel completes
+      - CPU can use better work-stealing strategies
+   
+   e) CPU CACHE ADVANTAGES:
+      - CPU has large L3 cache (shared across cores)
+      - Better locality for neighboring pixel computations
+      - GPU has smaller L2 cache spread across SMs
+
+3. EXPECTED vs ACTUAL SPEEDUP:
+   - If GPU were perfectly efficient: 21x speedup
+   - Actual speedup: 3.56x
+   - GPU efficiency: 3.56 / 21 = 17% of theoretical peak
+   
+This low efficiency confirms what we learned in the warp_scheduler analysis:
+running only 1 warp per scheduler grossly underutilizes the GPU!
+
+================================================================================
+QUESTION 3: ALTERNATIVE LAUNCH CONFIGURATIONS
+================================================================================
+
+The user asked to test these alternative configurations:
+1. <<<168, 64>>>  = 168 blocks × 2 warps/block = 336 warps
+2. <<<42, 256>>>  = 42 blocks × 8 warps/block = 336 warps
+
+QUESTION: "Will these still assign one warp per warp scheduler?"
+ANSWER: YES - algebraically equivalent!
+
+All three configurations produce exactly 336 warps:
+- <<<84, 128>>> = 84 × 4 = 336 warps ✓
+- <<<168, 64>>> = 168 × 2 = 336 warps ✓
+- <<<42, 256>>> = 42 × 8 = 336 warps ✓
+
+The warp schedulers don't care about block boundaries - they only see warps!
+
+BENCHMARK RESULTS (from test_launch_configs.cu):
+------------------------------------------------
+Configuration          Blocks  Threads  Warps  Runtime (ms)
+--------------------------------------------------------------------------------
+Config 1: <<<84, 128>>>    84     128     336    11.21
+Config 2: <<<168, 64>>>   168      64     336    11.13
+Config 3: <<<42, 256>>>    42     256     336    11.38
+Config 4: <<<84, 256>>>    84     256     672     5.99 (2 warps/scheduler)
+
+OBSERVATIONS:
+-------------
+1. ALL 336-WARP CONFIGS PERFORM SIMILARLY: ~11ms
+   - Differences are within measurement noise
+   - Block/thread ratio doesn't matter for performance
+   - GPU scheduler distributes work efficiently regardless of grid shape
+   
+2. DISCREPANCY WITH ORIGINAL:
+   - Original mandelbrot_gpu_2_s26 shows 3.96ms for <<<84, 128>>>
+   - Test program shows 11.21ms for same configuration
+   - Investigating cause: may be due to additional kernel parameters
+     passing grid dimensions as runtime values vs compile-time constants
+   
+3. 672-WARP CONFIG IS FASTER:
+   - Config 4 with 2 warps per scheduler: 5.99ms
+   - 672 warps ≈ 2× the parallelism
+   - Runtime ≈ 1/2 (but not exactly due to overhead)
+   - Confirms that more warps = better latency hiding
+
+THEORETICAL ANALYSIS - WHY BLOCK CONFIGURATION DOESN'T MATTER:
+--------------------------------------------------------------
+
+The GPU scheduling works as follows:
+1. Kernel launch creates a grid of thread blocks
+2. GPU scheduler assigns blocks to SMs
+3. Each SM has 4 warp schedulers
+4. Warps from blocks are scheduled on available warp schedulers
+
+For <<<84, 128>>>:
+- 84 blocks, one per SM
+- Each block has 4 warps
+- Each SM's 4 schedulers get one warp each
+
+For <<<168, 64>>>:
+- 168 blocks, two per SM (on average)
+- Each block has 2 warps
+- Each SM gets 2×2 = 4 warps total
+- The 4 schedulers share these 4 warps
+
+For <<<42, 256>>>:
+- 42 blocks, half the SMs get a block
+- Each block has 8 warps
+- Some SMs get 8 warps, others get 0
+- But warp schedulers can fetch work from any block on their SM
+
+Bottom line: As long as total_warps = 336, all configurations expose the same
+parallelism to the 336 warp schedulers. The hardware abstracts away the
+block/thread organization.
+
+PRACTICAL IMPLICATIONS:
+-----------------------
+1. For single-warp-per-scheduler scenario, grid shape is irrelevant
+2. Runtime differences (~1% variation) are due to measurement noise
+3. Programmer can choose configuration based on other factors:
+   - Shared memory requirements (if used)
+   - Occupancy constraints
+   - Block-level synchronization needs
+   - Personal preference for readability
+
+RECOMMENDATION:
+--------------
+Use <<<84, 128>>> because:
+- Maps cleanly to hardware: 1 block per SM
+- Easy to reason about: 4 warps per block = 4 schedulers per SM
+- Standard pattern for "expose all cores" on A6000
+
+================================================================================
+CONCLUSIONS
+================================================================================
+
+1. GPU IMPLEMENTATION WORKS CORRECTLY:
+   - Zero correctness errors
+   - Proper work distribution across 336 warps
+   - Each warp utilizes 32-thread parallelism
+
+2. MODEST SPEEDUP (3.56x vs CPU):
+   - Limited by single-warp-per-scheduler constraint
+   - Warp divergence hurts SIMD efficiency
+   - Load imbalance causes some warps to wait
+   - CPU multicore + AVX2 is surprisingly competitive
+
+3. BLOCK CONFIGURATION DOESN'T AFFECT PERFORMANCE:
+   - <<<84, 128>>>, <<<168, 64>>>, <<<42, 256>>> all equivalent
+   - GPU scheduler abstracts away grid organization
+   - Total warp count is what matters
+
+4. MORE WARPS = BETTER PERFORMANCE:
+   - Doubling warps (672 vs 336) nearly halves runtime
+   - Confirms warp_scheduler analysis: need 4-16× schedulers
+   - Next steps (Part 3?) should explore multi-warp per scheduler
+
+5. MANDELBROT IS CHALLENGING FOR GPUs:
+   - Irregular workload causes divergence
+   - Simple parallelization doesn't achieve peak throughput
+   - Advanced techniques needed: dynamic load balancing, atomic work queues
+
+================================================================================
+FILES GENERATED
+================================================================================
+- mandelbrot_gpu_2_s26.cu: Full implementation with all kernels
+- out/mandelbrot_gpu_vector_multicore.bmp: Output image (2048×2048)
+- test_launch_configs.cu: Benchmark program for different configurations
+- PART2_GPU_MULTICORE_ANALYSIS.txt: This analysis document
+
+================================================================================

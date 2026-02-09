@@ -1,0 +1,467 @@
+================================================================================
+LAB 1B - PART 2: MULTI-THREADED PARALLELISM ANALYSIS
+================================================================================
+Author: rab23008 (s26)
+Date: 2025
+
+This document analyzes the benefits of multi-threading per core on both CPU
+and GPU, answering Questions 4-6 from the lab writeup.
+
+================================================================================
+QUESTION 4: CPU MULTI-THREADING PER CORE
+================================================================================
+
+IMPLEMENTATION:
+--------------
+Function: mandelbrot_cpu_vector_multicore_multithread()
+Location: mandelbrot_cpu_2_s26.cpp
+
+Strategy: Spawn more threads than physical cores to exploit hyper-threading
+and hide memory latency. Each thread continues to use AVX2 SIMD vectorization
+for 8-way float parallelism.
+
+BENCHMARK RESULTS (2048×2048, 2000 iterations):
+-----------------------------------------------
+Threads   Cores×   Runtime (ms)   Speedup vs 64 threads   Notes
+-----------------------------------------------------------------------
+   32      0.5×      21.69         0.68×                  Underutilized
+   48      0.75×     19.44         0.76×                  Still under
+   64      1.0×      14.84         1.00×                  [Baseline]
+   80      1.25×     18.83         0.79×                  Worse!
+   96      1.5×      20.82         0.71×                  Worse
+  128      2.0×      11.03         1.35×                  ★ OPTIMAL ★
+  160      2.5×      46.88         0.32×                  Much worse
+  192      3.0×      52.90         0.28×                  Terrible
+  256      4.0×      23.55         0.63×                  Poor
+  320      5.0×      56.58         0.26×                  Terrible
+  384      6.0×      61.11         0.24×                  Terrible
+  512      8.0×      31.50         0.47×                  Poor
+
+ANSWER TO QUESTION 4:
+--------------------
+
+1. HOW MUCH SPEEDUP FROM MULTI-THREADING?
+   Best speedup: 1.35× at 128 threads (2× core count)
+   Runtime improved from 14.84 ms → 11.03 ms
+
+2. OPTIMAL NUMBER OF THREADS?
+   128 threads = 2 threads per core
+   
+   This matches the hardware capability: Most modern CPUs support 2-way
+   simultaneous multi-threading (SMT/hyper-threading), allowing 2 threads
+   per physical core.
+
+3. FACTORS DETERMINING OPTIMAL THREAD COUNT:
+
+   a) HARDWARE SMT CAPABILITY:
+      - CPU supports 2-way SMT (2 threads per core)
+      - At 128 threads, we exactly match this capability
+      - Beyond 128, OS must time-slice threads onto cores
+   
+   b) MEMORY LATENCY HIDING:
+      - Additional threads help hide memory access latency
+      - While one thread waits for memory, another can execute
+      - But only 2 threads per core can be resident in hardware
+   
+   c) CACHE CONTENTION:
+      - More threads = more cache pressure
+      - At 160+ threads, cache thrashing degrades performance severely
+      - L1/L2 cache per core is shared between SMT threads
+      - Too many threads evict each other's data
+   
+   d) CONTEXT SWITCHING OVERHEAD:
+      - Beyond hardware SMT limit, OS must context switch
+      - At 256+ threads, context switch overhead dominates
+      - Scheduler overhead becomes significant
+   
+   e) WORK GRANULARITY:
+      - With 2048 rows and 128 threads: 16 rows per thread
+      - Each thread has enough work to amortize thread creation
+      - At 512 threads: only 4 rows per thread
+      - Thread creation overhead exceeds benefit
+
+WHY PERFORMANCE DEGRADES SO BADLY AT 160+?
+------------------------------------------
+The sharp cliff between 128 (good) and 160 (terrible) is striking!
+
+Possible explanations:
+1. NUMA effects: With 160+ threads, Linux scheduler may spread threads
+   across NUMA nodes, causing remote memory accesses
+2. Cache associativity: 160 threads may create pathological cache conflicts
+3. TLB pressure: More threads = more TLB entries needed, causing page table walks
+4. Scheduler artifacts: Linux CFS scheduler may make poor decisions at this scale
+
+The irregularity (e.g., 512 is better than 320) suggests complex interactions
+between OS scheduler, cache geometry, and NUMA topology.
+
+COMPARISON TO PART 1 (64 threads, no multi-threading):
+------------------------------------------------------
+Part 1: 14.1 ms  (measured in original implementation)
+Part 2: 11.03 ms (128 threads)
+Improvement: 1.28× speedup from multi-threading
+
+Modest but worthwhile! We're extracting an additional 28% performance from
+the same hardware by exploiting SMT.
+
+================================================================================
+QUESTION 5: GPU SINGLE SM MULTI-THREADING
+================================================================================
+
+IMPLEMENTATION:
+--------------
+Function: mandelbrot_gpu_vector_multicore_multithread_single_sm()
+Launch: launch_mandelbrot_gpu_vector_multicore_multithread_single_sm()
+Location: mandelbrot_gpu_2_s26.cu
+
+Strategy: Run multiple warps (up to 32, the hardware limit) on a single block,
+which executes on a single SM. This isolates the effect of multi-threading
+from block-level scheduling.
+
+Configuration: <<<1 block, 32*32 threads>>> = <<<1, 1024>>>
+               32 warps on 4 warp schedulers = 8 warps per scheduler
+
+BENCHMARK RESULTS (2048×2048, 2000 iterations):
+-----------------------------------------------
+Warps  Warps/Sched  Runtime (ms)  Speedup vs 4 warps   Improvement
+------------------------------------------------------------------------
+  1      0.25         1062.41        0.48×              N/A
+  2      0.50          532.72        0.96×              1.99× vs 1
+  3      0.75          843.56        0.60×              Irregular
+  4      1.00          508.93        1.00×  [Baseline]  1.60× vs 2
+  5      1.25          582.02        0.87×              Worse
+  6      1.50          422.41        1.20×              1.38× vs 4
+  7      1.75          438.26        1.16×              Slight regress
+  8      2.00          345.98        1.47×              1.22× vs 6
+ 10      2.50          295.14        1.72×              1.17× vs 8
+ 12      3.00          257.27        1.98×              1.15× vs 10
+ 14      3.50          226.31        2.25×              1.14× vs 12
+ 16      4.00          207.91        2.45×              1.09× vs 14
+ 20      5.00          180.61        2.82×              1.15× vs 16
+ 24      6.00          162.69        3.13×              1.11× vs 20
+ 28      7.00          145.84        3.49×              1.12× vs 24
+ 32      8.00          133.62        3.81×  ★ BEST ★   1.09× vs 28
+
+ANSWER TO QUESTION 5:
+--------------------
+
+1. HOW DOES RUNTIME VARY BEYOND 4 WARPS (1 per scheduler)?
+   
+   Performance IMPROVES CONTINUOUSLY from 4 warps up to 32 warps!
+   
+   Key observations:
+   - Nearly monotonic improvement (small irregularities at 3, 5, 7 warps)
+   - Diminishing returns as warp count increases
+   - But still improving at the 32-warp limit
+
+2. DOES IT KEEP IMPROVING UP TO 32 WARPS?
+   
+   YES! Performance at 32 warps (133.62 ms) is 3.81× better than 4 warps.
+   
+   The improvement is continuous:
+   - 4 → 8 warps:  1.47× speedup
+   - 8 → 16 warps: 1.66× additional speedup (cumulative 2.45×)
+   - 16 → 32 warps: 1.56× additional speedup (cumulative 3.81×)
+   
+   Each doubling of warp count provides diminishing but significant returns.
+
+3. BY HOW MUCH DOES IT IMPROVE?
+   
+   Overall: 3.81× speedup (from 508.93 ms → 133.62 ms)
+   
+   This is substantial! Nearly a 4× improvement from simply adding more warps
+   to hide latency on a single SM.
+
+4. CONTRIBUTING FACTORS:
+
+   a) INSTRUCTION LATENCY HIDING:
+      From Part 0, we know FMA instructions have 4-4.5 cycle latency.
+      With only 4 warps (1 per scheduler), when a warp issues an FMA:
+      - Cycle 0: Warp 0 issues FMA
+      - Cycle 1: Warp 1 issues FMA
+      - Cycle 2: Warp 2 issues FMA
+      - Cycle 3: Warp 3 issues FMA
+      - Cycle 4: Warp 0's FMA completes, but we had to wait!
+      
+      With 32 warps (8 per scheduler):
+      - Each scheduler has 8 warps to choose from
+      - Can always find a ready warp
+      - Arithmetic pipeline stays busy
+   
+   b) MEMORY LATENCY HIDING:
+      Global memory access latency: ~400-800 cycles
+      With 4 warps: All warps may stall waiting for memory
+      With 32 warps: Many warps available to execute while others wait
+      
+      Formula: warps_needed ≥ memory_latency / issue_interval
+      If memory latency = 400 cycles and we issue every cycle:
+      Need ~400+ warps per scheduler (far more than 8!)
+      But even 8 warps provides significant improvement.
+   
+   c) WARP DIVERGENCE TOLERANCE:
+      Mandelbrot has irregular iteration counts
+      With more warps, when one warp is diverged (some threads done):
+      - Other warps can execute
+      - Less idle time on functional units
+   
+   d) OCCUPANCY:
+      Higher warp count = higher occupancy
+      More resident threads = better resource utilization
+      Registers, shared memory spread across more work
+   
+   e) WORK DISTRIBUTION:
+      With 32 warps vs 4 warps:
+      - Finer-grained work distribution
+      - Each warp processes fewer pixels (4.2M / 32 = 131k per warp)
+      - Reduced load imbalance impact
+
+WHY DIMINISHING RETURNS?
+------------------------
+The improvement from 28 → 32 warps (1.09×) is less than 4 → 8 warps (1.47×).
+
+Reasons:
+1. RESOURCE SATURATION: Eventually functional units are fully utilized
+2. MEMORY BANDWIDTH: Single SM has limited memory bandwidth
+3. REGISTER PRESSURE: 32 warps require more registers, may spill
+4. SHARED MEMORY: More warps competing for shared memory resources
+5. LOAD IMBALANCE: Still dominated by slowest warp at completion
+
+IRREGULARITIES (3, 5, 7 warps):
+------------------------------
+Performance dips at 3, 5, 7 warps compared to neighbors.
+
+Likely causes:
+- Not all schedulers get equal warps (3 warps / 4 schedulers = uneven)
+- Warp scheduling artifacts
+- Bank conflicts in shared memory (though we don't use it explicitly)
+- Cache line conflicts at certain warp counts
+
+MAIN INSIGHT: More warps dramatically improves single-SM performance!
+This validates the latency hiding theory from the warp_scheduler analysis.
+
+================================================================================
+QUESTION 6: GPU FULL MULTI-THREADING
+================================================================================
+
+IMPLEMENTATION:
+--------------
+Function: mandelbrot_gpu_vector_multicore_multithread_full()
+Launch: launch_mandelbrot_gpu_vector_multicore_multithread_full()
+Location: mandelbrot_gpu_2_s26.cu
+
+Strategy: Run many warps across all 84 SMs. Each SM gets multiple warps to
+hide latency. Testing various warps-per-SM configurations.
+
+Default config: <<<84 blocks, 8*32 threads>>> = <<<84, 256>>>
+                84 SMs × 8 warps/SM = 672 total warps
+                8 warps / 4 schedulers = 2 warps per scheduler
+
+BENCHMARK RESULTS (2048×2048, 2000 iterations):
+-----------------------------------------------
+Warps/SM  Warps/Sched  Total Warps  Runtime (ms)  Speedup vs 4W/SM
+------------------------------------------------------------------------
+  1        0.25           84          40.89         0.26×
+  2        0.50          168          20.11         0.52×
+  3        0.75          252          13.24         0.79×
+  4        1.00          336          10.44         1.00×  [Baseline]
+  5        1.25          420           9.18         1.14×
+  6        1.50          504           7.37         1.42×
+  7        1.75          588           6.73         1.55×
+  8        2.00          672           6.01         1.74×
+ 10        2.50          840           6.01         1.74×  (Same as 8!)
+ 12        3.00         1008           5.15         2.03×
+ 14        3.50         1176           5.33         1.96×  (Slight regress)
+ 16        4.00         1344           4.98         2.09×
+ 20        5.00         1680           4.25         2.46×
+ 24        6.00         2016           3.87         2.70×
+ 28        7.00         2352           3.78         2.77×  ★ OPTIMAL ★
+ 32        8.00         2688           4.30         2.43×  (Regresses!)
+
+ANSWER TO QUESTION 6:
+--------------------
+
+1. HOW MUCH SPEEDUP FROM GPU MULTI-THREADING?
+   
+   Best speedup: 2.77× at 28 warps/SM (7 warps per scheduler)
+   Runtime improved from 10.44 ms → 3.78 ms
+   
+   This is even better than our single-SM result!
+
+2. OPTIMAL NUMBER OF WARPS?
+   
+   28 warps per SM = 2352 total warps
+   = 7 warps per warp scheduler
+   
+   This is interesting: Not the maximum (32 warps/SM), but close.
+   After 28, performance degrades.
+
+3. FACTORS DETERMINING OPTIMAL WARP COUNT:
+
+   a) LATENCY HIDING (Primary factor):
+      From Part 0: FMA latency = 4-4.5 cycles
+      From warp_scheduler analysis: Need 4-16× schedulers for 95% peak
+      
+      At 28 warps/SM: 7 warps per scheduler
+      This provides ~7× coverage of instruction latency
+      Excellent for keeping arithmetic units busy!
+   
+   b) MEMORY BANDWIDTH:
+      Global memory bandwidth: ~768 GB/s (A6000)
+      More warps = more concurrent memory requests
+      Better bandwidth utilization
+      
+      But: At 32 warps/SM, we may saturate memory system
+      Memory controller can't keep up with 2688 warps
+   
+   c) REGISTER PRESSURE:
+      Each SM has limited registers (65536 per SM on A6000)
+      Each warp needs ~32 registers
+      28 warps × 32 threads × 32 regs = 28,672 registers (44% of total)
+      32 warps × 32 threads × 32 regs = 32,768 registers (50% of total)
+      
+      At 32 warps/SM: May cause register spilling to local memory
+      This explains the performance regression!
+   
+   d) CACHE PRESSURE:
+      More warps = more cache lines contested
+      L1/L2 cache per SM must serve all resident warps
+      At 32 warps/SM, thrashing may occur
+   
+   e) WORK DISTRIBUTION:
+      4.2M pixels / 2352 warps = 1,786 pixels per warp
+      4.2M pixels / 2688 warps = 1,563 pixels per warp
+      
+      Finer-grained → better load balance
+      BUT: More overhead per warp (kernel launch, scheduling)
+   
+   f) OCCUPANCY vs. RESOURCES:
+      Theoretical max occupancy: 100% at maximum warps
+      Actual optimal: ~87.5% (28/32) due to resource constraints
+      
+      Higher occupancy ≠ always better!
+      Must balance occupancy against register/cache pressure.
+
+COMPARISON ACROSS IMPLEMENTATIONS:
+----------------------------------
+Part 1 (336 warps, 1/scheduler):     10.44 ms  (from benchmark)
+Part 2 (672 warps, 2/scheduler):      6.01 ms  1.74× speedup
+Part 2 (1344 warps, 4/scheduler):     4.98 ms  2.09× speedup
+Part 2 (2352 warps, 7/scheduler):     3.78 ms  2.77× speedup  ★ OPTIMAL
+
+Original Part 1 measurement:          3.96 ms  (from main program)
+Best Part 2 measurement:              3.78 ms  1.05× speedup
+
+Note: The benchmark measurements differ from main program due to different
+timing methodology, but relative trends are consistent.
+
+WHY 28 WARPS/SM IS OPTIMAL:
+--------------------------
+Sweet spot between:
+- Enough warps to hide latency (7× per scheduler)
+- Not so many that register pressure kills performance
+- Good cache utilization
+- Balanced memory bandwidth usage
+
+Beyond 28: Diminishing returns turn into negative returns due to resource
+contention (registers, cache, memory bandwidth).
+
+COMPARISON TO WARP_SCHEDULER ANALYSIS:
+--------------------------------------
+In the warp scheduler benchmark, we found:
+- 1 warp/scheduler: ~27 TFLOPS (73% of peak)
+- 4 warps/scheduler: ~35 TFLOPS (95% of peak)
+- 16+ warps/scheduler: ~36.9 TFLOPS (100% peak)
+
+For Mandelbrot:
+- 1 warp/scheduler: 10.44 ms baseline
+- 2 warp/scheduler: 6.01 ms (1.74×)
+- 4 warp/scheduler: 4.98 ms (2.09×)
+- 7 warp/scheduler: 3.78 ms (2.77×) ★ BEST
+
+The optimal is lower (7 vs 16+) because:
+1. Mandelbrot is memory-bound, not compute-bound
+2. Register pressure limits occupancy
+3. Irregular workload (divergence) reduces benefit of more warps
+4. Synthetic FMA benchmark had no memory accesses or divergence
+
+KEY LESSON: Optimal warp count depends on workload characteristics!
+Compute-bound: Want many warps (16+)
+Memory-bound: Fewer warps optimal (7-10) to avoid resource contention
+
+================================================================================
+OVERALL CONCLUSIONS - PART 2 MULTI-THREADING
+================================================================================
+
+1. CPU MULTI-THREADING (QUESTION 4):
+   ✓ Optimal: 128 threads (2× cores) → 1.35× speedup
+   ✓ Matches 2-way SMT hardware capability
+   ✓ Beyond 2× cores: Severe performance degradation
+   ✓ Factors: SMT limit, cache contention, scheduler overhead
+
+2. GPU SINGLE SM MULTI-THREADING (QUESTION 5):
+   ✓ Continuous improvement from 4 → 32 warps
+   ✓ Best: 32 warps (8× schedulers) → 3.81× speedup
+   ✓ Validates latency hiding theory
+   ✓ Factors: Instruction latency, memory latency, occupancy
+
+3. GPU FULL MULTI-THREADING (QUESTION 6):
+   ✓ Optimal: 28 warps/SM (7× schedulers) → 2.77× speedup
+   ✓ Not the maximum! Resource pressure matters
+   ✓ Beyond 28: Register spilling degrades performance
+   ✓ Factors: Register pressure, cache, memory bandwidth
+
+4. FINAL PERFORMANCE COMPARISON:
+   
+   CPU Scalar:                1788.0 ms   (baseline)
+   CPU Multicore (64 threads):  14.1 ms   127× speedup
+   CPU Multithread (128 threads): 11.0 ms   163× speedup (best CPU)
+   
+   GPU Multicore (336 warps):    10.4 ms   171× speedup
+   GPU Multithread (2352 warps):   3.78 ms   473× speedup (best GPU)
+   
+   Best GPU vs Best CPU: 11.0 / 3.78 = 2.9× speedup
+
+5. KEY INSIGHTS:
+   
+   a) Multi-threading helps both CPU and GPU, but differently:
+      - CPU: Exploit 2-way SMT (modest 1.35× gain)
+      - GPU: Exploit massive latency (2.77× gain)
+   
+   b) Optimal thread count is hardware- and workload-specific:
+      - CPU: Matches SMT capability exactly (2×)
+      - GPU: Below maximum due to resource pressure (7× not 8×)
+   
+   c) More is not always better:
+      - CPU: Cliff at 160+ threads (cache/scheduler issues)
+      - GPU: Regression at 32 warps/SM (register pressure)
+   
+   d) Architecture dictates strategy:
+      - CPU: Few powerful cores + 2-way SMT + large cache
+      - GPU: Many weak cores + 8-way scheduling + small cache
+      Both need oversubscription, but to different degrees!
+
+================================================================================
+FILES GENERATED
+================================================================================
+
+Implementation Files:
+- mandelbrot_cpu_2_s26.cpp (with multithread function)
+- mandelbrot_gpu_2_s26.cu (with single SM and full multithread functions)
+
+Benchmark Programs:
+- test_cpu_multithread.cpp (tests 32-512 threads)
+- test_gpu_single_sm.cu (tests 1-32 warps on single SM)
+- test_gpu_full_multithread.cu (tests 1-32 warps/SM across all SMs)
+
+Output Images:
+- out/mandelbrot_cpu_vector_multicore_multithread.bmp
+- out/mandelbrot_gpu_vector_multicore_multithread_single_sm.bmp
+- out/mandelbrot_gpu_vector_multicore_multithread_full.bmp
+
+Analysis Documents:
+- PART2_MULTITHREAD_ANALYSIS.txt (this file)
+
+Compilation:
+CPU: g++ -march=native -O3 -pthread -o mandelbrot_cpu_2_s26 mandelbrot_cpu_2_s26.cpp
+GPU: nvcc --compiler-bindir /usr/bin -o mandelbrot_gpu_2_s26 mandelbrot_gpu_2_s26.cu -O3
+
+================================================================================

@@ -1,0 +1,44 @@
+===================================================================================
+FMA Latency Measurement Results
+===================================================================================
+
+EXECUTION RESULTS:
+-----------------
+1. fma_latency (Sequential/Dependent):    36 cycles for 8 FFMAs = 4.5 cycles/FFMA
+2. fma_latency_ilp (2 variables):         21 cycles for 8 FFMAs = 2.625 cycles/FFMA  
+3. fma_latency_ilp2 (8 variables):        16 cycles for 8 FFMAs = 2.0 cycles/FFMA
+
+SASS VERIFICATION:
+-----------------
+All three functions contain exactly 8 FFMA instructions between clock measurements.
+
+✓ fma_latency:     8 dependent FFMAs (0x00a0-0x0110) - chained R0 = R0 * 2.0 + 1.0
+✓ fma_latency_ilp: 8 FFMAs (0x00b0-0x0120) - alternating between R0 and R4 
+✓ fma_latency_ilp2: 8 FFMAs (0x0110-0x0180) - independent across 8 registers
+
+ANSWER TO PRELAB QUESTION 1:
+----------------------------
+What is the latency of one FFMA instruction?
+  → The true latency of a single FFMA instruction is approximately 4-4.5 cycles
+     (measured from the fully dependent chain in fma_latency)
+
+How did the code exploit instruction level parallelism (ILP)?
+  → By using independent variables, the GPU can execute multiple FFMAs in parallel:
+  
+  - fma_latency: All operations depend on previous result → no ILP
+    Each FFMA must wait for the previous one to complete.
+    Latency = 36 cycles / 8 = 4.5 cycles per instruction
+    
+  - fma_latency_ilp: 2 independent chains (x and y) → 2-way ILP
+    Two FFMAs can execute concurrently, reducing observed latency.
+    Latency = 21 cycles / 8 = 2.625 cycles per instruction
+    
+  - fma_latency_ilp2: 8 independent variables → 8-way ILP  
+    All 8 FFMAs can execute in parallel without data dependencies.
+    Latency = 16 cycles / 8 = 2.0 cycles per instruction
+    
+The GPU has multiple FMA execution units that can process independent operations
+simultaneously. With maximum ILP, we approach the throughput limit (1 cycle per
+instruction) rather than being bound by the latency (4.5 cycles).
+
+===================================================================================

@@ -1,0 +1,60 @@
+================================================================================
+THROUGHPUT vs WARPS - KEY DATA POINTS
+================================================================================
+
+Warps    Warps/Sched   TFLOPS   % of Peak   Notes
+------   -----------   ------   ---------   ---------------------------------
+  168      0.5          4.75      12.9%     Severe underutilization
+  336      1.0          9.48      25.7%     1 warp per scheduler
+  504      1.5         14.22      38.5%     
+  672      2.0         18.94      51.3%     
+  840      2.5         23.59      64.0%     
+ 1008      3.0         28.18      76.4%     
+ 1176      3.5         32.31      87.6%     
+ 1344      4.0         34.91      94.6%     ** 4× schedulers (latency match!)
+ 1512      4.5         22.80      61.8%     DIP (SM occupancy boundary)
+ 1680      5.0         25.76      69.8%     
+ 2688      8.0         35.71      96.8%     
+ 4032     12.0         35.65      96.6%     
+ 5376     16.0         36.17      98.0%     ** Peak region begins
+ 6720     20.0         36.13      98.0%     
+ 8064     24.0         36.70      99.5%     ** Maximum throughput
+10752     32.0         36.88     100.0%     ** Peak performance
+13440     40.0         36.79      99.8%     
+
+================================================================================
+PERFORMANCE REGIONS
+================================================================================
+
+Region 1: UNDERUTILIZED (0-1000 warps)
+└─ Not enough warps to hide FMA latency
+└─ Linear scaling with number of warps
+
+Region 2: APPROACHING PEAK (1000-5000 warps)
+└─ 1344 warps (4× schedulers) = 95% of peak
+└─ Matches FMA latency of 4 cycles
+└─ Some dips due to SM resource constraints
+
+Region 3: PEAK PERFORMANCE (5000-14000 warps)
+└─ 16+ warps per scheduler
+└─ Full latency hiding
+└─ ~99-100% of achievable throughput
+└─ Saturated execution units
+
+================================================================================
+LATENCY HIDING CALCULATION
+================================================================================
+
+With FMA latency = 4 cycles:
+- Need 4 warps per scheduler to hide latency completely
+- 336 schedulers × 4 warps = 1344 warps minimum
+- Observed: 1344 warps achieves 34.91 TFLOPS (95% of peak!)
+
+This confirms the theory: Number of warps needed ≈ Instruction latency
+
+Beyond 16 warps/scheduler (5376 total), additional warps provide:
+- Memory latency tolerance
+- Better load balancing
+- Resilience to control flow divergence
+
+================================================================================
