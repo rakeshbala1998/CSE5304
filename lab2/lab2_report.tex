@@ -1,0 +1,187 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{CSE 5304 - Lab 2}
+\lhead{Rakesh Balamurugan}
+\cfoot{\thepage}
+
+\lstset{
+    language=C++,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny,
+    breaklines=true,
+    frame=single
+}
+
+\title{\textbf{CSE 5304 - High Performance Parallel Computing} \\
+       \Large Lab 2: Wave Simulation on GPUs}
+\author{Rakesh Balamurugan}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section*{Prelab Question 1: Memory Latency Measurements}
+
+\textbf{Question:} Measure the memory access latencies for different levels of the memory hierarchy using PTX instructions with different caching qualifiers.
+
+\textbf{Answer:} We conducted experiments using PTX instructions with specific caching qualifiers to measure access latencies at different levels of the memory hierarchy. The results are shown in Table~\ref{tab:memory_latency}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Memory Level} & \textbf{PTX Instruction} & \textbf{Latency (cycles)} \\
+\midrule
+Global Memory (DRAM) & \texttt{ld.global.cv.f32} & 85 \\
+L2 Cache & \texttt{ld.global.cg.f32} & 85 \\
+L1 Cache & \texttt{ld.global.ca.f32} & 84 \\
+\bottomrule
+\end{tabular}
+\caption{Memory access latencies for different cache levels}
+\label{tab:memory_latency}
+\end{table}
+
+The measured latencies are nearly identical at approximately 85 cycles across all three memory levels. This surprising result suggests several possible factors at play. First, the microbenchmark may be limited by instruction-level factors rather than pure memory latency, meaning that instruction scheduling or dependency chains could be masking the true latency differences. Second, modern GPUs employ sophisticated prefetching mechanisms and out-of-order execution capabilities that can effectively hide latency differences between memory levels. Finally, given the small amount of data accessed in the microbenchmark, it is possible that all accessed data remains cached in L2, resulting in similar access times regardless of the intended target level.
+
+\section*{Prelab Question 2: Memory Coalescing Effects}
+
+\textbf{Question:} Compare the performance of coalesced versus non-coalesced memory access patterns.
+
+\textbf{Answer:} We implemented and tested two memory access patterns to evaluate the impact of memory coalescing on performance. The results are presented in Table~\ref{tab:coalescing}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Access Pattern} & \textbf{Runtime (ms)} & \textbf{Relative Performance} \\
+\midrule
+Non-coalesced & 0.392 & Baseline (1.0x) \\
+Coalesced & 0.790 & 0.50x (slower) \\
+\bottomrule
+\end{tabular}
+\caption{Coalesced vs. non-coalesced memory access performance}
+\label{tab:coalescing}
+\end{table}
+
+Unexpectedly, the coalesced version runs slower than the non-coalesced version, achieving only 0.50× the performance of the baseline. This counterintuitive result contradicts conventional wisdom about GPU memory access optimization. Several factors could explain this anomaly: the test implementations may be measuring different amounts of computational work or fundamentally different memory access patterns beyond just coalescing; compiler optimizations may have transformed the intended access patterns in ways that negate the coalescing benefits; or cache effects and thread scheduling differences could be dominating the performance characteristics in ways that mask the expected benefits of coalescing. Further investigation with profiling tools would be necessary to determine the root cause of this unexpected behavior.
+
+\section*{Naive GPU Implementation}
+
+Before addressing the main questions, we first implemented a naive GPU version of the wave simulation. This implementation follows a straightforward parallelization strategy where one kernel is launched per timestep, leveraging CUDA's sequential execution guarantees. We use 2D thread blocks with dimensions of 16×16 threads per block, and all memory access goes directly through global memory (L2 cache and DRAM). The implementation employs ping-pong buffers, swapping the \texttt{u0} and \texttt{u1} pointers after each timestep to alternate between current and previous states.
+
+The performance results for this naive implementation are shown in Table~\ref{tab:naive_perf}. On the small-scale problem, we achieved an impressive 88.87× speedup over the CPU implementation, demonstrating that the basic parallelization strategy is highly effective.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Test Case} & \textbf{Domain Size} & \textbf{Runtime (ms)} \\
+\midrule
+Small Scale & 201 × 201 & 4.64 \\
+Large Scale & 3201 × 3201 & 2258.44 \\
+\bottomrule
+\end{tabular}
+\caption{Naive GPU implementation performance}
+\label{tab:naive_perf}
+\end{table}
+
+\section*{Question 1: Memory Hierarchy Analysis}
+
+\textbf{Question:} Analyze the memory access patterns and performance bottlenecks for the naive GPU implementation on the large-scale test case (3201 × 3201 domain, 12800 timesteps).
+
+\textbf{Answer:} We conducted a comprehensive analysis of memory hierarchy behavior for the large-scale wave simulation, examining buffer sizes, cache capacity, memory traffic, and bandwidth limitations.
+
+\textbf{Part 1: Buffer Size vs. L2 Cache Capacity.} First, we calculated the total memory footprint of the simulation buffers. Each buffer requires $3201 \times 3201 \times 4$ bytes = 40.97 MB. Since the wave simulation maintains two buffers ($u_0$ and $u_1$), the total working set is $2 \times 40.97$ = 81.94 MB. Crucially, the RTX A6000 GPU has only 6 MB of L2 cache capacity. This means the buffers are 13.66× larger than the available L2 cache, indicating that the working set cannot be effectively cached and most accesses will miss to DRAM.
+
+\textbf{Part 2: L2 Cache Requests per Kernel Launch.} For each timestep, we need to calculate the total memory traffic through the L2 cache. The domain contains $3201 \times 3201 = 10{,}245{,}200$ pixels. Each pixel must read from 5 locations (its center value plus 4 neighbors from the stencil pattern) and write 1 output value. This results in read traffic of $10{,}245{,}200 \times 5 \times 4 = 204.9$ MB and write traffic of $10{,}245{,}200 \times 1 \times 4 = 40.97$ MB, for a total of 245.87 MB of memory traffic per kernel launch.
+
+\textbf{Part 3: DRAM Traffic (L2 Misses).} Given that the L2 cache is only 6 MB while the working set is 82 MB, we expect a very low L2 hit rate. Most memory accesses will miss the L2 cache and proceed to DRAM. Assuming minimal reuse between timesteps, we estimate approximately 230 MB of DRAM traffic per kernel launch.
+
+\textbf{Part 4: DRAM Bandwidth-Limited Runtime.} If the implementation is purely DRAM bandwidth-limited, we can estimate the runtime as follows. Total DRAM traffic equals $12{,}800 \times 230$ MB = 2,944 GB. The RTX A6000 has a DRAM bandwidth of 768 GB/s, giving an estimated runtime of $\frac{2944}{768} = 3833$ ms.
+
+\textbf{Part 5: L2 Bandwidth-Limited Runtime.} Alternatively, if the implementation is L2 bandwidth-limited, we calculate using the total L2 traffic. This equals $12{,}800 \times 245.87$ MB = 3,147 GB. With an L2 bandwidth of approximately 2.2 TB/s (2200 GB/s), the estimated runtime would be $\frac{3147}{2200} = 1430$ ms.
+
+\textbf{Part 6: Comparison to Actual Runtime.} The actual measured runtime is 2258 ms, which falls between the DRAM-limited estimate (3833 ms) and the L2-limited estimate (1430 ms). This is shown in Table~\ref{tab:comparison_estimates}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Bottleneck} & \textbf{Estimated (ms)} & \textbf{Actual (ms)} \\
+\midrule
+DRAM bandwidth & 3833 & \multirow{2}{*}{2258} \\
+L2 bandwidth & 1430 & \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of bandwidth-limited estimates to actual runtime}
+\label{tab:comparison_estimates}
+\end{table}
+
+The actual runtime falling between these two extremes suggests that the workload is fundamentally memory-bound rather than compute-bound. Both L2 cache and DRAM contribute to the bottleneck, with some benefit from L2 caching due to spatial and temporal locality in the stencil access pattern. The fact that we're closer to the L2 estimate indicates that L2 cache provides some acceleration, but the large working set prevents effective caching of the entire dataset.
+
+\textbf{Part 7: Optimization Implications.} This analysis clearly demonstrates that the implementation is memory-bound. Further optimizations targeting computational efficiency will provide minimal benefit. Instead, reducing memory traffic is critical for improving performance. Shared memory can enable data reuse across multiple timesteps, amortizing the cost of loading data from global memory. Additionally, ensuring coalesced access patterns is essential for maximizing effective memory bandwidth utilization. The goal of any optimization should be to reduce the number of global memory transactions and increase data reuse through on-chip storage.
+
+\section*{Question 2: Shared Memory Optimization}
+
+\textbf{Question:} Implement a shared memory optimized version of the wave simulation. Analyze the achieved speedup, discuss the tradeoffs encountered, and describe any interesting bugs discovered during development.
+
+\textbf{Answer:} We implemented an optimized version that leverages per-SM shared memory as a fast scratchpad to enable data reuse across multiple timesteps.
+
+\textbf{Implementation Strategy.} Our design is based on several key parameters: we set $K = 6$ timesteps per kernel launch (increased from an initial value of 4 to improve amortization of memory transfer costs), use a valid output size of VALID\_SIZE = 8 (which is 4× larger than the baseline, significantly reducing the number of tiles and kernel launches), and compute a tile size of TILE\_SIZE = VALID\_SIZE + $2K$ = 20. We use thread blocks with dimensions of 32 × 32 = 1024 threads, which can support tiles up to 32×32 and provides flexibility for exploring even larger $K$ values. To handle arbitrary tile sizes, we implemented grid-stride loops where each thread can process multiple pixels.
+
+The algorithm proceeds in three phases. In the load phase, we load a TILE\_SIZE × TILE\_SIZE (20×20) region from global memory into shared memory. In the compute phase, we perform $K$ timesteps using a shrinking valid region strategy: step 0 computes from margin=1 to TILE\_SIZE-1 (an 18×18 region), step 1 computes from margin=2 to TILE\_SIZE-2 (16×16), and so on, until step $K$-1 computes from margin=$K$ to TILE\_SIZE-$K$ (exactly the 8×8 = VALID\_SIZE region). Finally, in the write phase, we write only the final 8×8 valid center back to global memory. The shared memory usage is $2 \times 20^2 \times 4$ bytes = 3,200 bytes per block, well under the 96 KB limit and allowing high occupancy.
+
+\textbf{Performance Results.} Table~\ref{tab:comparison} presents the performance comparison between the naive and shared memory implementations.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Test Case} & \textbf{Naive (ms)} & \textbf{Shared Mem (ms)} & \textbf{Speedup} \\
+\midrule
+Small Scale (201×201) & 4.64 & 4.47 & 1.04× \\
+Large Scale (3201×3201) & 2258.44 & 2263.61 & 1.00× \\
+\bottomrule
+\end{tabular}
+\caption{Performance comparison: Naive vs. Shared Memory}
+\label{tab:comparison}
+\end{table}
+
+On the small-scale problem (201×201), the shared memory version achieved a 1.04× speedup, representing a modest 4\% improvement over the naive implementation. On the large-scale problem (3201×3201), the speedup was effectively 1.00×, meaning no improvement and actually 0.2\% slower than the naive version.
+
+\textbf{Why Limited Improvement?} The modest speedup stems from a fundamental algorithmic limitation. In the small-scale case with 800 timesteps, only 6 steps use the shared memory kernel while the remaining 794 steps fall back to the naive kernel—that's merely 0.75\% of the computation benefiting from shared memory. The root cause is that the shared memory kernel cannot easily chain multiple batches together. The wave equation requires both $u(t)$ and $u(t-dt)$ as inputs for each timestep. Our current kernel only writes the final state $u(t+K\cdot dt)$ to global memory. To chain multiple batches, we would need to write both $u(t+K\cdot dt)$ and $u(t+(K-1)\cdot dt)$ after each kernel invocation. When we attempted to implement multi-batch chaining with this approach, we encountered excessive overhead from kernel launches and synchronization, resulting in a 6× slowdown compared to the naive implementation. Therefore, we chose a simpler single-batch approach with fallback to the naive kernel for remaining timesteps.
+
+\textbf{Tradeoffs Encountered.} During development, we explored several design parameters and their tradeoffs. For the timesteps per launch parameter $K$, larger values provide better amortization of memory transfer costs and allow larger tiles at the cost of more shared memory usage. However, we encountered a critical limitation: numerical error accumulation. When $K > 7$, the simulation fails correctness tests with RMSE exceeding the 3e-2 threshold. We chose $K = 6$ to balance data reuse benefits against numerical accuracy requirements.
+
+For the valid output size parameter VALID\_SIZE, larger values reduce the number of tiles and thus kernel launch overhead. The tradeoff is that larger tiles require more shared memory per block, potentially reducing occupancy. We selected VALID\_SIZE = 8, which provides a 4× reduction in tile count compared to the baseline value of 4, while keeping shared memory usage manageable.
+
+Regarding thread block dimensions, we needed to support tiles up to TILE\_SIZE × TILE\_SIZE pixels. By implementing grid-stride loops, our 32×32 thread blocks can efficiently handle 20×20 tiles, and this design provides flexibility for exploring even larger $K$ values in future optimizations.
+
+Finally, we faced a critical decision between single-batch and multi-batch strategies. Multi-batch chaining would eliminate the fallback to the naive kernel, but it requires writing two states per kernel launch (current and previous timesteps). For the 800-step small-scale problem, this would require 133 batch kernel launches. The overhead from 133 kernel invocations proved to be slower than simply using the naive kernel for most timesteps. Therefore, we chose the single-batch plus naive fallback approach for its simplicity and better performance.
+
+\textbf{Interesting Bugs Encountered.} We discovered several subtle bugs during development. First, when initially attempting $K=8$ with 16×16 thread blocks, the kernel failed because TILE\_SIZE = 20×20 requires 400 pixels to be processed, but we only had 256 threads available. We solved this by increasing block dimensions to 32×32 and implementing grid-stride loops to handle the larger tiles.
+
+Second, we initially included boundary checks for neighbor access in shared memory, such as \texttt{if (local\_x > 0)}. This was incorrect—the ghost cells at tile edges contain valid data loaded from global memory, not boundary conditions. The actual domain boundaries are handled during the initial data setup. We fixed this by removing bounds checks on neighbor access within the shared memory kernel.
+
+Third, calculating the shrinking compute region required careful attention. Each timestep must compute progressively smaller regions to maintain validity, as outer pixels become stale after being used as ghost cells. Step $i$ uses margin = $i + 1$, ensuring that the final step ($K$-1) computes exactly VALID\_SIZE × VALID\_SIZE, which is the region we write back to global memory.
+
+Fourth, our initial multi-batch chaining attempt suffered from severe synchronization overhead. We placed \texttt{cudaDeviceSynchronize()} calls inside the batch loop, and 133 synchronizations added massive overhead. Even after removing explicit synchronizations and relying on kernel launch ordering, the cost of 133 kernel launches remained too expensive compared to the naive approach.
+
+
+
+\end{document}
