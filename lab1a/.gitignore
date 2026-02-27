@@ -1,0 +1,8 @@
+*.o
+*.out
+*.class
+__pycache__/
+*.log
+/build/
+*.exe
+.cse5304/

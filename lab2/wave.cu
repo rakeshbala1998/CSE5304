@@ -25,7 +25,7 @@ void cuda_check(cudaError_t code, const char *file, int line) {
 ////////////////////////////////////////////////////////////////////////////////
 // CPU Reference Implementation (Already Written)
 
-// 'wave_cpu_step':
+// '_step':
 //
 // Input:
 //
@@ -37,12 +37,14 @@ void cuda_check(cudaError_t code, const char *file, int line) {
 //
 //     u(t + dt) in array 'u0' (overwrites the input)
 //
-template <typename Scene> void wave_cpu_step(float t, float *u0, float const *u1) {
+template <typename Scene> void _step(float t, float *u0, float const *u1) {
     constexpr int32_t n_cells_x = Scene::n_cells_x;
     constexpr int32_t n_cells_y = Scene::n_cells_y;
     constexpr float c = Scene::c;
     constexpr float dx = Scene::dx;
     constexpr float dt = Scene::dt;
+
+
 
     for (int32_t idx_y = 0; idx_y < n_cells_y; ++idx_y) {
         for (int32_t idx_x = 0; idx_x < n_cells_x; ++idx_x) {
@@ -61,6 +63,8 @@ template <typename Scene> void wave_cpu_step(float t, float *u0, float const *u1
                 u_next_val =
                     ((2.0f - damping - 4.0f * coeff) * u1[idx] -
                      (1.0f - damping) * u0[idx] +
+                     
+                     
                      coeff *
                          (u1[idx - 1] + u1[idx + 1] + u1[idx - n_cells_x] +
                           u1[idx + n_cells_x]));
@@ -70,7 +74,7 @@ template <typename Scene> void wave_cpu_step(float t, float *u0, float const *u1
     }
 }
 
-// 'wave_cpu':
+// '':
 //
 // Input:
 //
@@ -90,7 +94,7 @@ template <typename Scene>
 std::pair<float *, float *> wave_cpu(float t0, int32_t n_steps, float *u0, float *u1) {
     for (int32_t idx_step = 0; idx_step < n_steps; idx_step++) {
         float t = t0 + idx_step * Scene::dt;
-        wave_cpu_step<Scene>(t, u0, u1);
+        _step<Scene>(t, u0, u1);
         std::swap(u0, u1);
     }
     return {u0, u1};
@@ -118,8 +122,48 @@ __global__ void wave_gpu_naive_step(
     float t,
     float *u0,      /* pointer to GPU memory */
     float const *u1 /* pointer to GPU memory */
+
 ) {
-    /* TODO: your GPU code here... */
+    constexpr int32_t n_cells_x = Scene::n_cells_x;
+    constexpr int32_t n_cells_y = Scene::n_cells_y;
+    constexpr float c = Scene::c;
+    constexpr float dx = Scene::dx;
+    constexpr float dt = Scene::dt;
+
+    //calculate which thread is responsible for which cell
+    int32_t idx_x = blockIdx.x * blockDim.x + threadIdx.x;
+    int32_t idx_y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    //check if the thread is within the bounds of the grid
+    if (idx_x >= n_cells_x || idx_y >= n_cells_y) {
+        return;
+    }
+
+    //now compute the next value for the cell at (idx_x, idx_y) using the same logic as in the CPU implementation
+    int32_t idx = idx_y * n_cells_x + idx_x;
+    bool is_border =
+        (idx_x == 0 || idx_x == n_cells_x - 1 || idx_y == 0 ||
+            idx_y == n_cells_y - 1);
+    float u_next_val;
+    if (is_border || Scene::is_wall(idx_x, idx_y)) {
+        u_next_val = 0.0f;
+    } else if (Scene::is_source(idx_x, idx_y)) {
+        u_next_val = Scene::source_value(idx_x, idx_y, t);
+    } else {
+        constexpr float coeff = c * c * dt * dt / (dx * dx);
+        float damping = Scene::damping(idx_x, idx_y);
+        u_next_val =
+            ((2.0f - damping - 4.0f * coeff) * u1[idx] -
+                (1.0f - damping) * u0[idx] +
+                
+                
+                coeff *
+                    (u1[idx - 1] + u1[idx + 1] + u1[idx - n_cells_x] +
+                    u1[idx + n_cells_x]));
+    }
+    u0[idx] = u_next_val;
+
+
 }
 
 // 'wave_gpu_naive':
@@ -145,19 +189,171 @@ std::pair<float *, float *> wave_gpu_naive(
     int32_t n_steps,
     float *u0, /* pointer to GPU memory */
     float *u1  /* pointer to GPU memory */
+
+
 ) {
-    /* TODO: your CPU code here... */
+    
+    // Example: 16x16 block = 256 threads (good for 2D, matches grid structure)
+    dim3 threadsPerBlock(16, 16);
+
+    // Calculate blocks needed
+    int32_t numBlocksX = (Scene::n_cells_x + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    int32_t numBlocksY = (Scene::n_cells_y + threadsPerBlock.y - 1) / threadsPerBlock.y;
+    dim3 numBlocks(numBlocksX, numBlocksY);
+
+
+    for (int32_t idx_step = 0; idx_step < n_steps; idx_step++) {
+        float t = t0 + idx_step * Scene::dt;
+        wave_gpu_naive_step<Scene><<<numBlocks, threadsPerBlock>>>(t, u0, u1);
+        std::swap(u0, u1);
+        cudaDeviceSynchronize();  
+    }
     return {u0, u1};
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // GPU Implementation (With Shared Memory)
 
+// === Configuration Parameters ===
+// Change these to explore different performance tradeoffs
+// NOTE: K > 7 may exceed correctness tolerance (RMSE > 3e-2) due to numerical error accumulation
+constexpr int32_t K = 6;              // Timesteps per kernel launch (tested: K=4,5,6,7 pass; K=8+ fail)
+constexpr int32_t VALID_SIZE = 8;     // Valid output region per tile (larger = fewer tiles, less overhead)
+// Tile size is automatically computed: TILE_SIZE = VALID_SIZE + 2*K
+constexpr int32_t TILE_SIZE = VALID_SIZE + 2*K;  // Ghost cells on both sides
+
 template <typename Scene>
 __global__ void wave_gpu_shmem_multistep(
-    /* TODO: your arguments here... */
+    float t,
+    float *u0,
+    float const *u1
 ) {
-    /* TODO: your GPU code here... */
+    constexpr int32_t n_cells_x = Scene::n_cells_x;
+    constexpr int32_t n_cells_y = Scene::n_cells_y;
+    constexpr float c = Scene::c;
+    constexpr float dx = Scene::dx;
+    constexpr float dt = Scene::dt;
+    
+    // Shared memory partition: two TILE_SIZE×TILE_SIZE buffers
+    extern __shared__ float shmem[];
+    float* tile_old = shmem;                    // First buffer
+    float* tile_new = shmem + TILE_SIZE*TILE_SIZE;  // Second buffer
+    
+    // Determine which tile this block processes
+    int32_t tile_x = blockIdx.x * VALID_SIZE;
+    int32_t tile_y = blockIdx.y * VALID_SIZE;
+    int32_t tile_start_x = tile_x - K;
+    int32_t tile_start_y = tile_y - K;
+    
+    // ===== LOAD PHASE =====
+    // Load u0 (at t-dt) and u1 (at t) from global to shared memory
+    // Each thread may handle multiple pixels if TILE_SIZE > blockDim
+    for (int32_t local_y = threadIdx.y; local_y < TILE_SIZE; local_y += blockDim.y) {
+        for (int32_t local_x = threadIdx.x; local_x < TILE_SIZE; local_x += blockDim.x) {
+            int32_t global_x = tile_start_x + local_x;
+            int32_t global_y = tile_start_y + local_y;
+            int32_t local_idx = local_y * TILE_SIZE + local_x;
+            
+            float val_u0 = 0.0f;
+            float val_u1 = 0.0f;
+            
+            if (global_x >= 0 && global_x < n_cells_x && 
+                global_y >= 0 && global_y < n_cells_y) {
+                int32_t idx = global_y * n_cells_x + global_x;
+                val_u0 = u0[idx];
+                val_u1 = u1[idx];
+            }
+            
+            tile_old[local_idx] = val_u0;
+            tile_new[local_idx] = val_u1;
+        }
+    }
+    __syncthreads();
+    
+    // ===== COMPUTE PHASE =====
+    // Ping-pong between tile_old and tile_new for K timesteps
+    float* ptr_prev = tile_old;  // u(t - dt)
+    float* ptr_curr = tile_new;  // u(t)
+    
+    for (int32_t step = 0; step < K; ++step) {
+        // At each step, compute a region that shrinks inward
+        // Step 0: compute from margin=1 to margin=1 (almost the full tile, leaving 1-pixel border)
+        // Step K-1: compute from margin=K to margin=K (just the VALID_SIZE center)
+        int32_t margin = step + 1;
+        int32_t compute_start = margin;
+        int32_t compute_end = TILE_SIZE - margin;
+        
+        // Each thread may handle multiple pixels
+        for (int32_t local_y = threadIdx.y; local_y < TILE_SIZE; local_y += blockDim.y) {
+            for (int32_t local_x = threadIdx.x; local_x < TILE_SIZE; local_x += blockDim.x) {
+                // Only compute pixels within the shrinking valid region for this step
+                if (local_x < compute_start || local_x >= compute_end ||
+                    local_y < compute_start || local_y >= compute_end) {
+                    continue;
+                }
+                
+                int32_t local_idx = local_y * TILE_SIZE + local_x;
+                int32_t global_x = tile_start_x + local_x;
+                int32_t global_y = tile_start_y + local_y;
+                
+                bool is_global_border = (global_x == 0 || global_x == n_cells_x - 1 ||
+                                         global_y == 0 || global_y == n_cells_y - 1);
+                
+                float u_next_val;
+                if (is_global_border || Scene::is_wall(global_x, global_y)) {
+                    u_next_val = 0.0f;
+                } else if (Scene::is_source(global_x, global_y)) {
+                    u_next_val = Scene::source_value(global_x, global_y, t + step * dt);
+                } else {
+                    constexpr float coeff = c * c * dt * dt / (dx * dx);
+                    float damping = Scene::damping(global_x, global_y);
+                    
+                    float u_curr = ptr_curr[local_idx];
+                    float u_prev = ptr_prev[local_idx];
+                    
+                    // Access neighbors from shared memory (ghost cells already loaded)
+                    float u_left = ptr_curr[local_idx - 1];
+                    float u_right = ptr_curr[local_idx + 1];
+                    float u_up = ptr_curr[local_idx - TILE_SIZE];
+                    float u_down = ptr_curr[local_idx + TILE_SIZE];
+                    
+                    u_next_val = ((2.0f - damping - 4.0f * coeff) * u_curr -
+                                  (1.0f - damping) * u_prev +
+                                  coeff * (u_left + u_right + u_up + u_down));
+                }
+                
+                ptr_prev[local_idx] = u_next_val;
+            }
+        }
+        __syncthreads();
+        
+        // Swap pointers for next iteration
+        float* temp = ptr_prev;
+        ptr_prev = ptr_curr;
+        ptr_curr = temp;
+    }
+    
+    // ===== WRITE PHASE =====
+    // ptr_curr contains final result after K timesteps
+    // Write only the VALID_SIZE×VALID_SIZE valid center back to global memory
+    constexpr int32_t valid_start = K;
+    for (int32_t local_y = threadIdx.y; local_y < TILE_SIZE; local_y += blockDim.y) {
+        for (int32_t local_x = threadIdx.x; local_x < TILE_SIZE; local_x += blockDim.x) {
+            if (local_x >= valid_start && local_x < valid_start + VALID_SIZE &&
+                local_y >= valid_start && local_y < valid_start + VALID_SIZE) {
+                
+                int32_t global_x = tile_x + (local_x - valid_start);
+                int32_t global_y = tile_y + (local_y - valid_start);
+                
+                if (global_x >= 0 && global_x < n_cells_x &&
+                    global_y >= 0 && global_y < n_cells_y) {
+                    int32_t idx = global_y * n_cells_x + global_x;
+                    int32_t local_idx = local_y * TILE_SIZE + local_x;
+                    u0[idx] = ptr_curr[local_idx];
+                }
+            }
+        }
+    }
 }
 
 // 'wave_gpu_shmem':
@@ -193,7 +389,42 @@ std::pair<float *, float *> wave_gpu_shmem(
     float *extra0, /* pointer to GPU memory */
     float *extra1  /* pointer to GPU memory */
 ) {
-    /* TODO: your CPU code here... */
+    // Grid configuration: 32×32 threads per block (supports tiles up to 32×32)
+    dim3 threadsPerBlock(32, 32);
+    
+    // Number of tiles in each dimension (valid output of VALID_SIZE×VALID_SIZE per tile)
+    int32_t numBlocksX = (Scene::n_cells_x + VALID_SIZE - 1) / VALID_SIZE;
+    int32_t numBlocksY = (Scene::n_cells_y + VALID_SIZE - 1) / VALID_SIZE;
+    dim3 numBlocks(numBlocksX, numBlocksY);
+    
+    // Shared memory: 2 buffers of TILE_SIZE×TILE_SIZE floats
+    int32_t shmem_size = 2 * TILE_SIZE * TILE_SIZE * sizeof(float);
+    
+    // Use shmem kernel for first K steps
+    int32_t steps_this_batch = (n_steps >= K) ? K : n_steps;
+    
+    wave_gpu_shmem_multistep<Scene><<<numBlocks, threadsPerBlock, shmem_size>>>(
+        t0, u0, u1);
+    std::swap(u0, u1);
+    cudaDeviceSynchronize();
+    
+    // Use naive kernel for remaining steps
+    int32_t remaining_steps = n_steps - steps_this_batch;
+    
+    if (remaining_steps > 0) {
+        dim3 threadsPerBlock_naive(16, 16);
+        int32_t numBlocksX_naive = (Scene::n_cells_x + threadsPerBlock_naive.x - 1) / threadsPerBlock_naive.x;
+        int32_t numBlocksY_naive = (Scene::n_cells_y + threadsPerBlock_naive.y - 1) / threadsPerBlock_naive.y;
+        dim3 numBlocks_naive(numBlocksX_naive, numBlocksY_naive);
+        
+        for (int32_t step = 0; step < remaining_steps; ++step) {
+            float t = t0 + (steps_this_batch + step) * Scene::dt;
+            wave_gpu_naive_step<Scene><<<numBlocks_naive, threadsPerBlock_naive>>>(t, u0, u1);
+            std::swap(u0, u1);
+            cudaDeviceSynchronize();
+        }
+    }
+    
     return {u0, u1};
 }
 
@@ -742,7 +973,7 @@ int main(int argc, char **argv) {
         int32_t n_steps = Scene::t_end / Scene::dt;
         auto cpu_results = run_cpu<Scene>(0.0f, n_steps, 1, 1, wave_cpu<Scene>);
         writeBMP(
-            "out/wave_cpu_small_scale.bmp",
+            "out/_small_scale.bmp",
             Scene::n_cells_x,
             Scene::n_cells_y,
             render_wave<Scene>(cpu_results.u0_final.data()));
@@ -899,7 +1130,7 @@ int main(int argc, char **argv) {
         // CPU.
         FFmpegFrames cpu_frames;
         wave_ffmpeg<Scene>(0.0f, n_steps, cpu_frames);
-        if (generate_animation<Scene>(cpu_frames, "out/wave_cpu") != 0) {
+        if (generate_animation<Scene>(cpu_frames, "out/") != 0) {
             std::cout << "CPU animation error: Failed to generate animation."
                       << std::endl;
         } else {

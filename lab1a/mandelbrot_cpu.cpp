@@ -24,7 +24,7 @@ void mandelbrot_cpu_scalar(uint32_t img_size, uint32_t max_iters, uint32_t *out)
             uint32_t iters = 0;
             while (x2 + y2 <= 4.0f && iters < max_iters) {
                 float x = x2 - y2 + cx;
-                float y = w - x2 - y2 + cy;
+                float y = w - (x2 + y2) + cy;
                 x2 = x * x;
                 y2 = y * y;
                 float z = x + y;
@@ -40,9 +40,94 @@ void mandelbrot_cpu_scalar(uint32_t img_size, uint32_t max_iters, uint32_t *out)
 
 /// <--- your code here --->
 
+
 void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-    // TODO: Implement this function.
+    for (uint64_t i = 0; i < img_size; ++i) {
+        // Initialize cy (same for all 8 pixels in row)
+        __m256 cy_vec = _mm256_set1_ps((float(i) / float(img_size)) * 2.5f - 1.25f);
+        
+        for (uint64_t j = 0; j < img_size; j += 8) {
+            // Initialize cx_vec for 8 pixels [j, j+1, j+2, ..., j+7]
+            // Step 1: Create offset vector [0, 1, 2, 3, 4, 5, 6, 7]
+            __m256 offset_vec = _mm256_set_ps(7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f, 0.0f);
+            
+            // Step 2: Compute step and broadcast
+            float step = (1.0f / float(img_size)) * 2.5f;
+            __m256 step_vec = _mm256_set1_ps(step);
+            
+            // Step 3: Multiply offset by step
+            __m256 offset_scaled = _mm256_mul_ps(offset_vec, step_vec);
+            
+            // Step 4: Compute base_cx and broadcast
+            float base_cx = (float(j) / float(img_size)) * 2.5f - 2.0f;
+            __m256 base_cx_vec = _mm256_set1_ps(base_cx);
+            
+            // Step 5: Add base + offset
+            __m256 cx_vec = _mm256_add_ps(base_cx_vec, offset_scaled);
+            
+            // Initialize iteration variables to zero
+            __m256 x2_vec = _mm256_setzero_ps();
+            __m256 y2_vec = _mm256_setzero_ps();
+            __m256 w_vec = _mm256_setzero_ps();
+            __m256i iters_vec = _mm256_setzero_si256();
+            
+            // While loop with masking
+            while (true) {
+                // Compute escape condition: x2 + y2 <= 4.0
+                __m256 sum_vec = _mm256_add_ps(x2_vec, y2_vec);
+                __m256 escape_mask = _mm256_cmp_ps(sum_vec, _mm256_set1_ps(4.0f), _CMP_LE_OQ);
+                
+                // Compute iteration limit condition: iters < max_iters
+                __m256i max_iters_vec = _mm256_set1_epi32(max_iters);
+                __m256i iters_mask = _mm256_cmpgt_epi32(max_iters_vec, iters_vec);
+                __m256 iters_mask_float = _mm256_castsi256_ps(iters_mask);
+                
+                // Combine both conditions with AND
+                __m256 mask = _mm256_and_ps(escape_mask, iters_mask_float);
+                
+                // Check if all pixels are done
+                if (_mm256_testz_ps(mask, mask)) {
+                    break;  // All pixels finished!
+                }
+                
+                // Compute next iteration values
+                // x = x2 - y2 + cx
+                __m256 x_vec = _mm256_add_ps(_mm256_sub_ps(x2_vec, y2_vec), cx_vec);
+                
+                // y = w - x2 - y2 + cy
+                __m256 y_vec = _mm256_add_ps(_mm256_sub_ps(_mm256_sub_ps(w_vec, x2_vec), y2_vec), cy_vec);
+                
+                // new_x2 = x * x
+                __m256 new_x2 = _mm256_mul_ps(x_vec, x_vec);
+                
+                // new_y2 = y * y
+                __m256 new_y2 = _mm256_mul_ps(y_vec, y_vec);
+                
+                // z = x + y
+                __m256 z_vec = _mm256_add_ps(x_vec, y_vec);
+                
+                // new_w = z * z
+                __m256 new_w = _mm256_mul_ps(z_vec, z_vec);
+                
+                // Update variables using mask (only for active pixels)
+                x2_vec = _mm256_blendv_ps(x2_vec, new_x2, mask);
+                y2_vec = _mm256_blendv_ps(y2_vec, new_y2, mask);
+                w_vec = _mm256_blendv_ps(w_vec, new_w, mask);
+                
+                // Increment iters for active pixels only
+                __m256i increment = _mm256_and_si256(
+                    _mm256_castps_si256(mask),
+                    _mm256_set1_epi32(1)
+                );
+                iters_vec = _mm256_add_epi32(iters_vec, increment);
+            }
+            
+            // Store the 8 iteration results to output
+            _mm256_storeu_si256((__m256i*)&out[i * img_size + j], iters_vec);
+        }
+    }
 }
+
 
 /// <--- /your code here --->
 
